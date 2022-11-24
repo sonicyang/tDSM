@@ -1,0 +1,4 @@
+SECTIONS
+{
+  .rdma 0x000000040000000 (NOLOAD) : {}
+}
