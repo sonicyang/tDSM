@@ -31,9 +31,6 @@
 #include "node.hpp"
 #include "timerfd.hpp"
 
-extern volatile std::uint8_t rdma_memory[rdma_size] __attribute__((section(".rdma"), aligned(page_size)));
-static inline constexpr auto rdma_memory_ptr = const_cast<std::uint8_t*>(rdma_memory);
-
 // initialized by the ELF constructor
 extern std::string master_ip;
 extern std::uint16_t my_port;
@@ -49,14 +46,55 @@ class Swapper : public PeerNode {
         return instance;
     }
 
-    inline auto memory() {
+    inline auto memory() const {
         return rdma_memory;
     }
 
-    inline auto size() {
+    inline auto size() const {
         return rdma_size;
     }
 
+    template<typename T>
+    inline auto lock(volatile T* ptr) {
+        const auto address = reinterpret_cast<std::uintptr_t>(ptr);
+        const auto size = sizeof(T);
+
+        SPDLOG_ASSERT_DUMP_IF_ERROR(
+            Packet::send(this->master_fd, Packet::LockPacket{ .address = address, .size = size }),
+            "Failed send locking message for 0x{:x}, size: {}",
+            address, size
+        );
+
+        {
+            std::unique_lock<std::mutex> lk{this->lock_mutex};
+            auto& ref = this->out_standing_locks[std::make_tuple(address, size)];
+            ref.first = false;
+            ref.second.wait(lk, [&ref] { return ref.first; });
+            this->out_standing_locks.erase(std::make_tuple(address, size));
+        }
+
+        return;
+    }
+
+    template<typename T>
+    inline auto unlock(volatile T* ptr) {
+        const auto address = reinterpret_cast<std::uintptr_t>(ptr);
+        const auto size = sizeof(T);
+
+        SPDLOG_ASSERT_DUMP_IF_ERROR(
+            Packet::send(this->master_fd, Packet::UnlockPacket{ .address = address, .size = size }),
+            "Failed send unlocking message for 0x{:x}, size: {}",
+            address, size
+        );
+
+        {
+            std::unique_lock<std::mutex> lk{this->unlock_mutex};
+            auto& ref = this->out_standing_unlocks[std::make_tuple(address, size)];
+            ref.first = false;
+            ref.second.wait(lk, [&ref] { return ref.first; });
+            this->out_standing_unlocks.erase(std::make_tuple(address, size));
+        }
+    }
 
  private:
     Swapper(bool is_master_) : PeerNode(::master_ip, ::my_port), is_master(is_master_), backing_memory_fd(memfd_create("test", 0)) {
@@ -152,36 +190,28 @@ class Swapper : public PeerNode {
 
     std::atomic<state> states[n_pages]{};
 
+    // Reading and writing coherence control
     std::atomic<bool> out_standing_reads[n_pages]{};
 
     mutable std::mutex fencing_mutex[n_pages]{};
     bool out_standing_writes[n_pages]{};
     std::set<std::size_t> fencing_set[n_pages]{};
 
+    // Locks
+    using Location_t = std::tuple<std::uintptr_t, std::size_t>;
+    struct LocationHash {
+        std::size_t operator()(const Location_t& key) const {
+           return std::get<0>(key) ^ std::get<1>(key);
+         }
+    };
+    mutable std::mutex lock_mutex{};
+    mutable std::mutex unlock_mutex{};
+    std::unordered_map<Location_t, std::pair<bool, std::condition_variable>, LocationHash> out_standing_locks{};
+    std::unordered_map<Location_t, std::pair<bool, std::condition_variable>, LocationHash> out_standing_unlocks{};
+
     //static inline std::binary_semaphore semaphores[n_pages];
 
     // Utility functions
-    auto inline get_frame_number(void* const addr) {
-        const auto uaddr = reinterpret_cast<std::uintptr_t>(addr);
-        const auto base = reinterpret_cast<std::uintptr_t>(rdma_memory);
-        // sanity check
-        SPDLOG_ASSERT_DUMP_IF_ERROR(
-            !(base <= uaddr && uaddr < base + rdma_size),
-            "The address is out-of-bound!"
-        );
-        return  (uaddr - base) / n_pages;
-    }
-
-    auto inline get_frame_address(const std::size_t frame_id) {
-        const auto base = reinterpret_cast<std::uintptr_t>(rdma_memory);
-        // sanity check
-        SPDLOG_ASSERT_DUMP_IF_ERROR(
-            !(frame_id < n_pages),
-            "The frame id is out-of-bound!"
-        );
-        return reinterpret_cast<void*>(frame_id * page_size + base);
-    }
-
     auto inline ask_page(const std::size_t frame_id) {
         // Download the page data from owner
         spdlog::trace("Asking frame {}", frame_id);
@@ -207,7 +237,7 @@ class Swapper : public PeerNode {
     auto inline page_out_page(const std::size_t frame_id) {
         spdlog::debug("Page out frame: {}", frame_id);
         SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
-            madvise(this->get_frame_address(frame_id), page_size, MADV_DONTNEED),
+            madvise(get_frame_address(frame_id), page_size, MADV_DONTNEED),
             "Cannot discard page mapping"
         );
     }
@@ -256,7 +286,7 @@ class Swapper : public PeerNode {
         const auto frame_id = msg.frame_id;
         bool request_outstanding = true;
         if(this->out_standing_reads[frame_id].compare_exchange_strong(request_outstanding, false, std::memory_order_seq_cst)) {
-            const auto base_address = this->get_frame_address(frame_id);
+            const auto base_address = get_frame_address(frame_id);
             SPDLOG_ASSERT_DUMP_IF_ERROR(
                 Packet::recv(fd, base_address, page_size),
                 "Failed recv a page, frame = {}",
@@ -281,7 +311,7 @@ class Swapper : public PeerNode {
     bool handle_my_page(const FileDescriptor& fd, const Packet::MyPagePacket& msg) final {
         // Someone is taking the ownership of a page
         const auto frame_id = msg.frame_id;
-        const auto base_address = this->get_frame_address(msg.frame_id);
+        const auto base_address = get_frame_address(msg.frame_id);
 
         auto peer = this->peers[fd.get()];
         if (!peer.has_value()) {  // Already closed?
@@ -338,7 +368,7 @@ class Swapper : public PeerNode {
         this->fencing_set[frame_id].emplace(peer_id);
 
         if (this->fencing_set[frame_id].size() == this->peers.size()) {
-            const auto base_address = this->get_frame_address(msg.frame_id);
+            const auto base_address = get_frame_address(msg.frame_id);
             this->faultfd.write_unprotect(base_address, page_size);
 
             this->out_standing_writes[frame_id] = false;
@@ -390,7 +420,7 @@ class Swapper : public PeerNode {
                 // Page fault?
                 // Read the page fault information
                 const auto fault = Swapper::faultfd.read();
-                const auto frame_id = this->get_frame_number(fault.address);
+                const auto frame_id = get_frame_number(fault.address);
                 const auto base_address = round_down_to_page_boundary(fault.address);
                 const auto current_state = this->states[frame_id].load(std::memory_order_acquire);
 
@@ -470,5 +500,30 @@ class Swapper : public PeerNode {
                 }
             }
         }
+    }
+
+    bool handle_lock(const FileDescriptor&, const Packet::LockPacket& msg) final {
+        {
+            std::scoped_lock<std::mutex> lk{this->lock_mutex};
+            auto& ref = this->out_standing_locks[std::make_tuple(msg.address, msg.size)];
+            ref.first = true;
+            ref.second.notify_one();
+        }
+        return false;
+    }
+
+    bool handle_unlock(const FileDescriptor&, const Packet::UnlockPacket& msg) final {
+        {
+            std::scoped_lock<std::mutex> lk{this->unlock_mutex};
+            auto& ref = this->out_standing_unlocks[std::make_tuple(msg.address, msg.size)];
+            ref.first = true;
+            ref.second.notify_one();
+        }
+        return false;
+    }
+
+    bool handle_no_unlock(const FileDescriptor&, const Packet::NoUnlockPacket& msg) final {
+        SPDLOG_ASSERT_DUMP_IF_ERROR(true, "Failed to Unlock 0x{:x}, size: {}, unlock something that is not locked!", msg.address, msg.size);
+        return false;
     }
 };

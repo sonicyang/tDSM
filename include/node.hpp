@@ -17,6 +17,7 @@
 #include <map>
 #include <functional>
 #include <mutex>
+#include <condition_variable>
 #include <unordered_map>
 
 #include "configs.hpp"
@@ -169,6 +170,15 @@ class Node {
             case Packet::PacketType::YOUR_PAGE:
                 err = forward_packet<Packet::YourPagePacket>(fd, std::mem_fn(&Node::handle_your_page));
                 break;
+            case Packet::PacketType::LOCK:
+                err = forward_packet<Packet::LockPacket>(fd, std::mem_fn(&Node::handle_lock));
+                break;
+            case Packet::PacketType::UNLOCK:
+                err = forward_packet<Packet::UnlockPacket>(fd, std::mem_fn(&Node::handle_unlock));
+                break;
+            case Packet::PacketType::NO_UNLOCK:
+                err = forward_packet<Packet::NoUnlockPacket>(fd, std::mem_fn(&Node::handle_no_unlock));
+                break;
             case Packet::PacketType::NUM_PACKET_TYPE:
                 spdlog::warn("Unknown or unhandled packet type {}", Packet::packet_type_to_string(type));
                 break;
@@ -243,6 +253,21 @@ class Node {
         spdlog::warn("Ignoring a YOUR_PAGE packet");
         return false;
     }
+
+    virtual bool handle_lock(const FileDescriptor&, const Packet::LockPacket&) {
+        spdlog::warn("Ignoring a LOCK packet");
+        return false;
+    }
+
+    virtual bool handle_unlock(const FileDescriptor&, const Packet::UnlockPacket&) {
+        spdlog::warn("Ignoring a UNLOCK packet");
+        return false;
+    }
+
+    virtual bool handle_no_unlock(const FileDescriptor&, const Packet::NoUnlockPacket&) {
+        spdlog::warn("Ignoring a NO_UNLOCK packet");
+        return false;
+    }
 };
 
 class MasterNode : public Node {
@@ -263,25 +288,29 @@ class MasterNode : public Node {
 
     // The clients for master
     struct Peer {
+        std::size_t id;
         std::string addr_str;
         struct in_addr addr;
         std::uint16_t port;
         FileDescriptor fd;
         CancelableThread thread{};
         Peer(
+            const std::size_t id_,
             const std::string& addr_str_,
             const struct in_addr& addr_,
             const std::uint16_t port_,
-            FileDescriptor&& fd_) : addr_str(addr_str_), addr(addr_), port(port_), fd(std::move(fd_)) {}
+            FileDescriptor&& fd_) : id(id_), addr_str(addr_str_), addr(addr_), port(port_), fd(std::move(fd_)) {}
     };
     std::atomic_uint64_t number_of_peers{0};
-    std::map<std::uint64_t, std::unique_ptr<Peer>> peers{};
+    std::map<int, std::unique_ptr<Peer>> peers{};
     mutable std::mutex peers_mutex{};
 
     inline decltype(auto) add_peer(const std::uint64_t peer_id, const std::string& addr_str, const struct in_addr& addr, const std::uint16_t port, FileDescriptor&& fd) {
         std::scoped_lock<std::mutex> lk{this->peers_mutex};
         // Add to the list of clients/peers
-        auto& ref = peers.emplace(peer_id, std::make_unique<Peer>(
+        const auto fd_value = fd.get();
+        auto& ref = peers.emplace(fd_value, std::make_unique<Peer>(
+            peer_id,
             addr_str,
             addr,
             port,
@@ -360,6 +389,72 @@ class MasterNode : public Node {
             }};
         }
     }
+
+    // Locks, one bit per byte, dictionary address at 64 bytes boundary
+    struct LockState {
+        std::size_t mask{};
+        std::condition_variable cv{};
+    };
+    mutable std::mutex lock_mutex[n_pages]{};
+    std::unordered_map<std::uintptr_t, LockState> lock_states[n_pages];
+
+    bool handle_lock(const FileDescriptor& fd, const Packet::LockPacket& msg) final {
+        auto& peer           = this->peers[fd.get()];
+        const auto peer_id   = peer->id;
+        const auto& addr_str = peer->addr_str;
+        const auto port      = peer->port;
+
+        const auto frame_id = get_frame_number(reinterpret_cast<void*>(msg.address));
+        const auto aligned_64_address = msg.address & ~(0x40 - 1);  // round down to 64 bytes boundary
+        const auto mask = ((std::uint64_t{1} << msg.size) - 1) << (msg.address - aligned_64_address);
+
+        std::unique_lock<std::mutex> lk{this->lock_mutex[frame_id]};
+        this->lock_states[frame_id][aligned_64_address].cv.wait(lk, [this, mask, frame_id, aligned_64_address] { return !(this->lock_states[frame_id][aligned_64_address].mask & mask); });
+        this->lock_states[frame_id][aligned_64_address].mask |= mask;
+
+        spdlog::trace("Locking 0x{:x}, {} bytes for {}:{}, ID: {}", msg.address, msg.size, addr_str, port, peer_id);
+
+        SPDLOG_ASSERT_DUMP_IF_ERROR(
+            Packet::send(fd, msg),
+            "Failed notify peer {}:{}, ID {} that lock is acquired",
+            addr_str, port, peer_id
+        );
+
+        return false;
+    }
+
+    bool handle_unlock(const FileDescriptor& fd, const Packet::UnlockPacket& msg) final {
+        auto& peer           = this->peers[fd.get()];
+        const auto peer_id   = peer->id;
+        const auto& addr_str = peer->addr_str;
+        const auto port      = peer->port;
+
+        const auto frame_id = get_frame_number(reinterpret_cast<void*>(msg.address));
+        const auto aligned_64_address = msg.address & ~(0x40 - 1);  // round down to 64 bytes boundary
+        const auto mask = ((std::uint64_t{1} << msg.size) - 1) << (msg.address - aligned_64_address);
+
+        std::unique_lock<std::mutex> lk{this->lock_mutex[frame_id]};
+        if ((this->lock_states[frame_id][aligned_64_address].mask & mask) != mask) {
+            SPDLOG_ASSERT_DUMP_IF_ERROR(
+                Packet::send(fd, Packet::NoUnlockPacket{ .address = msg.address, .size = msg.size }),
+                "Failed notify peer {}:{}, ID {} that unlock failed",
+                addr_str, port, peer_id
+            );
+        } else {
+            spdlog::trace("Unlocking 0x{:x}, {} bytes for {}:{}, ID: {}", msg.address, msg.size, addr_str, port, peer_id);
+
+            this->lock_states[frame_id][aligned_64_address].mask &= ~mask;
+            this->lock_states[frame_id][aligned_64_address].cv.notify_all();  // XXX: Probable Thundering herd problem?
+
+            SPDLOG_ASSERT_DUMP_IF_ERROR(
+                Packet::send(fd, Packet::UnlockPacket{ .address = msg.address, .size = msg.size }),
+                "Failed notify peer {}:{}, ID {} that unlock succeed",
+                addr_str, port, peer_id
+            );
+        }
+
+        return false;
+    }
 };
 
 class PeerNode : public Node {
@@ -437,6 +532,12 @@ class PeerNode : public Node {
 
     Peers peers{};
     std::uint64_t my_id{};
+    const std::string master_ip;
+    const std::uint16_t my_port;
+
+    // master <-> client
+    FileDescriptor master_fd;
+    CancelableThread master_communication_thread{};
 
     PeerNode(const std::string master_ip_, const std::uint16_t my_port_) : Node(my_port_), master_ip(master_ip_), my_port(my_port_), master_fd(socket(AF_INET, SOCK_STREAM, 0)) {
         SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
@@ -472,13 +573,6 @@ class PeerNode : public Node {
     PeerNode& operator=(PeerNode&&) = delete;
 
  private:
-    const std::string master_ip;
-    const std::uint16_t my_port;
-
-    // master <-> client
-    FileDescriptor master_fd;
-    CancelableThread master_communication_thread{};
-
     void listener() override {
         const auto epollfd = Epoll(this->listener_fd, this->listener_thread.evtfd);
         while (!this->listener_thread.stopped.load(std::memory_order_acquire)) {

@@ -25,6 +25,9 @@ namespace Packet {
         SEND_PAGE,
         MY_PAGE,
         YOUR_PAGE,
+        LOCK,
+        UNLOCK,
+        NO_UNLOCK,
         NUM_PACKET_TYPE
     };
 
@@ -44,6 +47,9 @@ namespace Packet {
             CASE(SEND_PAGE);
             CASE(MY_PAGE);
             CASE(YOUR_PAGE);
+            CASE(LOCK);
+            CASE(UNLOCK);
+            CASE(NO_UNLOCK);
             CASE(NUM_PACKET_TYPE);
         }
         return "";
@@ -118,6 +124,24 @@ namespace Packet {
     struct YourPagePacket {
         PacketHeader hdr = { .type = PacketType::YOUR_PAGE };
         std::size_t frame_id = 0x0;
+    } __attribute((packed));
+
+    struct LockPacket {
+        PacketHeader hdr = { .type = PacketType::LOCK };
+        std::uintptr_t address = 0x0;
+        std::size_t size = 0x0;
+    } __attribute((packed));
+
+    struct UnlockPacket {
+        PacketHeader hdr = { .type = PacketType::UNLOCK };
+        std::uintptr_t address = 0x0;
+        std::size_t size = 0x0;
+    } __attribute((packed));
+
+    struct NoUnlockPacket {
+        PacketHeader hdr = { .type = PacketType::NO_UNLOCK };
+        std::uintptr_t address = 0x0;
+        std::size_t size = 0x0;
     } __attribute((packed));
 
     // XXX: Add traits as protection
