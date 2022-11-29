@@ -1,6 +1,6 @@
 #include <spdlog/spdlog.h>
 
-static __attribute__((constructor(1))) inline auto init_logging() {
+static __attribute__((constructor(101))) inline auto init_logging() {
     spdlog::set_pattern("[%H:%M:%S] [thread %t] [%^%L%$] %v");
 
     const auto level = std::getenv("LOGLEVEL");

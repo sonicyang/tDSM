@@ -1,4 +1,5 @@
 #include <string>
+#include <iostream>
 
 #include "swapper.hpp"
 
@@ -18,6 +19,9 @@ ABSL_FLAG(bool, master, false, "Is master node");
 ABSL_FLAG(std::string, ip, "127.0.0.1", "IP address of master");
 ABSL_FLAG(std::uint16_t, port, 7000, "TCP port for communication");
 
+std::string master_ip;
+std::uint16_t my_port;
+
 namespace detail {
 static int argc;
 static char** argv;
@@ -34,10 +38,10 @@ struct StartUpInit {
 };
 }  // detail
 
-static detail::StartUpInit startupinit;
-
 // argc and argv is an gnu extension
-static __attribute__((constructor)) inline auto swapper_initialization(const int argc, char* argv[]) {
+static __attribute__((constructor(102))) inline auto swapper_initialization(const int argc, char* argv[]) {
     detail::argc = argc;
     detail::argv = argv;
 }
+
+static detail::StartUpInit startupinit;

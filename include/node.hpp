@@ -19,6 +19,8 @@
 #include <mutex>
 #include <unordered_map>
 
+#include "configs.hpp"
+#include "logging.hpp"
 #include "fd.hpp"
 #include "epoll.hpp"
 #include "packet.hpp"
@@ -29,17 +31,23 @@ static inline constexpr auto master_port = 9634;
 class Node {
  public:
     Node(const std::uint16_t port) : listener_fd(socket(AF_INET, SOCK_STREAM, 0)) {
-        if (listener_fd.get() < 0) {
-            spdlog::error("Failed to create the listener fd : {}", strerror(errno));
-            abort();
-        }
+        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+            listener_fd.get() < 0,
+            "Failed to create the listener fd"
+        );
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
         addr.sin_addr.s_addr = INADDR_ANY;
-        assert(!bind(listener_fd.get(), reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)));
-        assert(!listen(this->listener_fd.get(), max_concurrent_connection));
+        SPDLOG_ASSERT_DUMP_IF_ERROR(
+            bind(listener_fd.get(), reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)),
+            "Failed to bind to port: {}", port
+        );
+        SPDLOG_ASSERT_DUMP_IF_ERROR(
+            listen(this->listener_fd.get(), max_concurrent_connection),
+            "Failed to listen to socket: {}", listener_fd.get()
+        );
         constexpr auto enabled = 1;
         setsockopt(listener_fd.get(), SOL_SOCKET, SO_KEEPALIVE, &enabled, sizeof(enabled));
         this->listener_thread = std::thread{[this]() {
@@ -61,7 +69,10 @@ class Node {
 
     static inline auto addr_to_string(const struct in_addr& addr) {
         auto addr_str = std::string(INET_ADDRSTRLEN, ' ');
-        assert(inet_ntop(AF_INET, &addr, addr_str.data(), INET_ADDRSTRLEN));
+        SPDLOG_ASSERT_DUMP_IF_ERROR(
+            !inet_ntop(AF_INET, &addr, addr_str.data(), INET_ADDRSTRLEN),
+            "Failed convert a inet addr to string"
+        );
 
         auto it = std::find_if(addr_str.rbegin(), addr_str.rend(),
             [](char c) {
@@ -72,68 +83,6 @@ class Node {
     }
 
     virtual void listener() = 0;
-
-    template<typename T>
-    inline auto forward_packet(const FileDescriptor& fd, const auto& func) {
-        const auto msg = Packet::recv<T>(fd);
-        if (!msg.has_value()) {
-            return true;
-        }
-        return func(this, fd, msg.value());
-    }
-
-    inline bool handle_a_packet(const Packet::PacketType& type, const std::string& addr_str, const std::uint16_t port, const FileDescriptor& fd) {
-        bool err = false;
-        bool ret = false;
-
-        switch (type) {
-            case Packet::PacketType::DISCONNECT:
-                // No need to recv, socket is close by remote
-                spdlog::debug("Peer {}:{} disconnected!", addr_str, port);
-                ret = true;
-                break;
-            case Packet::PacketType::PING: {
-                const auto ping = Packet::recv<Packet::PingPacket>(fd);
-                if (!ping.has_value()) {
-                    err = true;
-                    break;
-                }
-                spdlog::debug("Ping!, Pong!");
-                err = Packet::send(fd, Packet::PongPacket{ .magic = ping.value().magic });
-                break;
-            }
-            case Packet::PacketType::PONG:
-                (void)Packet::recv<Packet::PongPacket>(fd);
-                break;
-            case Packet::PacketType::ASK_PORT:
-                err = forward_packet<Packet::AskPortPacket>(fd, std::mem_fn(&Node::ask_port));
-                break;
-            case Packet::PacketType::REPORT_PORT:
-                err = forward_packet<Packet::ReportPortPacket>(fd, std::mem_fn(&Node::report_port));
-                break;
-            case Packet::PacketType::REGISTER_PEER:
-                err = forward_packet<Packet::RegisterPeerPacket>(fd, std::mem_fn(&Node::register_peer));
-                break;
-            case Packet::PacketType::UNREGISTER_PEER:
-                err = forward_packet<Packet::UnregisterPeerPacket>(fd, std::mem_fn(&Node::unregister_peer));
-                break;
-            case Packet::PacketType::MYID:
-                err = forward_packet<Packet::MyIDPacket>(fd, std::mem_fn(&Node::my_id));
-                break;
-            case Packet::PacketType::ACK:
-                (void)Packet::recv<Packet::AckPacket>(fd);
-                break;
-            case Packet::PacketType::DONE_INIT:
-            case Packet::PacketType::NUM_PACKET_TYPE:
-                spdlog::warn("Unknown or unhandled packet type {}", type);
-                break;
-        }
-
-        if (err) {
-            spdlog::error("Reading from peer {} cause an error!", addr_str);
-        }
-        return ret;
-    }
 
     inline void handler(const std::string& addr_str, const std::uint16_t port, FileDescriptor& fd, CancelableThread& this_thread) {
         const auto epollfd = Epoll(fd, this_thread.evtfd);
@@ -159,31 +108,139 @@ class Node {
             // Tell the remote we are disconnecting
             Packet::send(fd, Packet::DisconnectPacket{});
         }
-        spdlog::debug("Connection to peer {}:{} ended!", addr_str, port);
+        spdlog::info("Connection to peer {}:{} ended!", addr_str, port);
         fd.release();
     }
 
-    virtual bool ask_port(const FileDescriptor&, const Packet::AskPortPacket&) {
+    template<typename T>
+    inline auto forward_packet(const FileDescriptor& fd, const auto& func) {
+        const auto msg = Packet::recv<T>(fd);
+        if (!msg.has_value()) {
+            return true;
+        }
+        return func(this, fd, msg.value());
+    }
+
+    inline bool handle_a_packet(const Packet::PacketType& type, const std::string& addr_str, const std::uint16_t port, const FileDescriptor& fd) {
+        bool err = false;
+        bool ret = false;
+
+        spdlog::debug("Handling packet: {} from {}:{}", Packet::packet_type_to_string(type), addr_str, port);
+
+        switch (type) {
+            case Packet::PacketType::DISCONNECT:
+                // No need to recv, socket is close by remote
+                spdlog::info("Peer {}:{} disconnected!", addr_str, port);
+                ret = true;
+                break;
+            case Packet::PacketType::PING:
+                err = forward_packet<Packet::PingPacket>(fd, std::mem_fn(&Node::handle_ping));
+                break;
+            case Packet::PacketType::PONG:
+                err = forward_packet<Packet::PongPacket>(fd, std::mem_fn(&Node::handle_pong));
+                break;
+            case Packet::PacketType::ACK:
+                err = forward_packet<Packet::AckPacket>(fd, std::mem_fn(&Node::handle_ack));
+                break;
+            case Packet::PacketType::ASK_PORT:
+                err = forward_packet<Packet::AskPortPacket>(fd, std::mem_fn(&Node::handle_ask_port));
+                break;
+            case Packet::PacketType::REPORT_PORT:
+                err = forward_packet<Packet::ReportPortPacket>(fd, std::mem_fn(&Node::handle_report_port));
+                break;
+            case Packet::PacketType::REGISTER_PEER:
+                err = forward_packet<Packet::RegisterPeerPacket>(fd, std::mem_fn(&Node::handle_register_peer));
+                break;
+            case Packet::PacketType::UNREGISTER_PEER:
+                err = forward_packet<Packet::UnregisterPeerPacket>(fd, std::mem_fn(&Node::handle_unregister_peer));
+                break;
+            case Packet::PacketType::MYID:
+                err = forward_packet<Packet::MyIDPacket>(fd, std::mem_fn(&Node::handle_my_id));
+                break;
+            case Packet::PacketType::ASK_PAGE:
+                err = forward_packet<Packet::AskPagePacket>(fd, std::mem_fn(&Node::handle_ask_page));
+                break;
+            case Packet::PacketType::SEND_PAGE:
+                err = forward_packet<Packet::SendPagePacketHdr>(fd, std::mem_fn(&Node::handle_send_page));
+                break;
+            case Packet::PacketType::MY_PAGE:
+                err = forward_packet<Packet::MyPagePacket>(fd, std::mem_fn(&Node::handle_my_page));
+                break;
+            case Packet::PacketType::YOUR_PAGE:
+                err = forward_packet<Packet::YourPagePacket>(fd, std::mem_fn(&Node::handle_your_page));
+                break;
+            case Packet::PacketType::NUM_PACKET_TYPE:
+                spdlog::warn("Unknown or unhandled packet type {}", Packet::packet_type_to_string(type));
+                break;
+        }
+
+        if (err) {
+            spdlog::error("Reading packet type {} from peer {} cause an error!", Packet::packet_type_to_string(type), addr_str);
+        }
+        return ret;
+    }
+
+    bool handle_ping(const FileDescriptor& fd, const Packet::PingPacket& msg) {
+        spdlog::trace("Ping!");
+        return Packet::send(fd, Packet::PongPacket{ .magic = msg.magic });
+    }
+
+    bool handle_pong(const FileDescriptor&, const Packet::PongPacket&) {
+        spdlog::trace("Pong!");
         return false;
     }
 
-    virtual bool report_port(const FileDescriptor&, const Packet::ReportPortPacket&) {
+    bool handle_ack(const FileDescriptor&, const Packet::AckPacket&) {
+        spdlog::trace("Got ACK!");
         return false;
     }
 
-    virtual bool done_init(const FileDescriptor&) {
+    virtual bool handle_ask_port(const FileDescriptor&, const Packet::AskPortPacket&) {
+        spdlog::warn("Ignoring a ASK_PORT packet");
         return false;
     }
 
-    virtual bool register_peer(const FileDescriptor&, const Packet::RegisterPeerPacket&) {
+    virtual bool handle_report_port(const FileDescriptor&, const Packet::ReportPortPacket&) {
+        spdlog::warn("Ignoring a REPORT_PORT packet");
         return false;
     }
 
-    virtual bool unregister_peer(const FileDescriptor&, const Packet::UnregisterPeerPacket) {
+    virtual bool handle_register_peer(const FileDescriptor&, const Packet::RegisterPeerPacket&) {
+        spdlog::warn("Ignoring a REGISTER_PEER packet");
         return false;
     }
 
-    virtual bool my_id(const FileDescriptor&, const Packet::MyIDPacket) {
+    virtual bool handle_unregister_peer(const FileDescriptor&, const Packet::UnregisterPeerPacket&) {
+        spdlog::warn("Ignoring a UNREGISTER_PEER packet");
+        return false;
+    }
+
+    virtual bool handle_my_id(const FileDescriptor&, const Packet::MyIDPacket&) {
+        spdlog::warn("Ignoring a MY_ID packet");
+        return false;
+    }
+
+    virtual bool handle_ask_page(const FileDescriptor&, const Packet::AskPagePacket&) {
+        spdlog::warn("Ignoring a ASK_PAGE packet");
+        return false;
+    }
+
+    virtual bool handle_send_page(const FileDescriptor& fd, const Packet::SendPagePacketHdr&) {
+        /* discard a page */
+        std::uint8_t dummy[page_size];
+        (void)Packet::recv(fd, dummy, page_size);
+        (void)dummy;
+        spdlog::warn("Ignoring a SEND_PAGE packet");
+        return false;
+    }
+
+    virtual bool handle_my_page(const FileDescriptor&, const Packet::MyPagePacket&) {
+        spdlog::warn("Ignoring a MY_PAGE packet");
+        return false;
+    }
+
+    virtual bool handle_your_page(const FileDescriptor&, const Packet::YourPagePacket&) {
+        spdlog::warn("Ignoring a YOUR_PAGE packet");
         return false;
     }
 };
@@ -219,7 +276,7 @@ class MasterNode : public Node {
     };
     std::atomic_uint64_t number_of_peers{0};
     std::map<std::uint64_t, std::unique_ptr<Peer>> peers{};
-    mutable std::mutex peers_mutex;
+    mutable std::mutex peers_mutex{};
 
     inline decltype(auto) add_peer(const std::uint64_t peer_id, const std::string& addr_str, const struct in_addr& addr, const std::uint16_t port, FileDescriptor&& fd) {
         std::scoped_lock<std::mutex> lk{this->peers_mutex};
@@ -236,7 +293,7 @@ class MasterNode : public Node {
     void listener() override {
         const auto epollfd = Epoll(this->listener_fd, this->listener_thread.evtfd);
         while (!this->listener_thread.stopped.load(std::memory_order_acquire)) {
-            spdlog::debug("Master waiting for peers to connect");
+            spdlog::trace("Master waiting for peers to connect");
 
             // Wait for event
             const auto [count, events] = epollfd.wait();
@@ -247,8 +304,7 @@ class MasterNode : public Node {
             struct sockaddr_in incomming_peer{};
             socklen_t incomming_peer_size = sizeof(incomming_peer);
             auto client_fd = FileDescriptor{::accept(this->listener_fd.get(), reinterpret_cast<struct sockaddr*>(&incomming_peer), &incomming_peer_size)};
-            if (client_fd.get() < 0) {
-                spdlog::error("Failed to accept a connection: ", strerror(errno));
+            SPDLOG_DUMP_IF_ERROR_WITH_ERRNO(client_fd.get() < 0, "Failed to accept a connection") {
                 continue;
             }
             constexpr auto enabled = 1;
@@ -256,10 +312,14 @@ class MasterNode : public Node {
 
             const auto addr_str = addr_to_string(incomming_peer.sin_addr);
             const auto peer_id = number_of_peers.fetch_add(1);
-            spdlog::debug("Accepting new peer : {}, ID: {}", addr_str, peer_id);
+            spdlog::trace("Accepting new peer : {}, ID: {}", addr_str, peer_id);
 
             // Get port
-            assert(!Packet::send(client_fd, Packet::AskPortPacket{ .peer_id = peer_id }));
+            SPDLOG_ASSERT_DUMP_IF_ERROR(
+                Packet::send(client_fd, Packet::AskPortPacket{ .peer_id = peer_id }),
+                "Failed send a AskPort packet to peer {}, ID {}",
+                addr_str, peer_id
+            );
             const auto response = Packet::recv<Packet::ReportPortPacket>(client_fd);
 
             if (!response.has_value()) {
@@ -268,7 +328,7 @@ class MasterNode : public Node {
                 continue;
             }
 
-            spdlog::debug("New peer {} at {}:{} connected!", peer_id, addr_str, response.value().port);
+            spdlog::trace("New peer {} at {}:{} connected!", peer_id, addr_str, response.value().port);
 
             {
                 std::scoped_lock<std::mutex> lk{this->peers_mutex};
@@ -310,7 +370,8 @@ class PeerNode : public Node {
             auto inline add(FileDescriptor&& fd, Ts&&... ts) {
                 std::scoped_lock<std::mutex> lk{this->mutex};
                 this->epollfd.add_fd(fd);
-                this->peers.emplace(fd.get(), Peer{std::move(fd), std::forward<Ts>(ts)...});
+                const auto fd_value = fd.get();
+                this->peers.emplace(fd_value, Peer{std::move(fd), std::forward<Ts>(ts)...});
             }
 
             auto inline del(FileDescriptor& fd) {
@@ -319,6 +380,7 @@ class PeerNode : public Node {
                     Packet::send(fd, Packet::DisconnectPacket{});
                 }
                 this->epollfd.delete_fd(fd);
+                this->peers.erase(fd.get());
                 fd.release();
             }
 
@@ -337,7 +399,6 @@ class PeerNode : public Node {
                 return this->epollfd;
             }
 
-         private:
             struct Peer {
                 FileDescriptor fd;
                 std::uint64_t id;
@@ -348,9 +409,8 @@ class PeerNode : public Node {
             };
             std::unordered_map<int, Peer> peers{};
             Epoll epollfd{};
-            mutable std::mutex mutex;
+            mutable std::mutex mutex{};
 
-         public:
             std::optional<Peer*> operator[](const int fd_to_find) {
                 std::scoped_lock<std::mutex> lk{this->mutex};
                 if (this->peers.contains(fd_to_find)) {
@@ -359,23 +419,46 @@ class PeerNode : public Node {
                     return {};
                 }
             }
+
+            inline auto size() const {
+                return this->peers.size();
+            }
+
+            template<typename T>
+            auto inline broadcast(const T& packet) {
+                std::scoped_lock<std::mutex> lk(this->mutex);
+                for (const auto& [fd, peer] : this->peers) {
+                    SPDLOG_ASSERT_DUMP_IF_ERROR(
+                        Packet::send(peer.fd, packet),
+                        "Cannot send packet, type = {}, during broadcast", packet.hdr.type);
+                }
+            }
     };
 
     Peers peers{};
+    std::uint64_t my_id{};
 
     PeerNode(const std::string master_ip_, const std::uint16_t my_port_) : Node(my_port_), master_ip(master_ip_), my_port(my_port_), master_fd(socket(AF_INET, SOCK_STREAM, 0)) {
-        if (master_fd.get() < 0) {
-            spdlog::error("Failed to create the socket for master : {}", strerror(errno));
-            abort();
-        }
+        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+            master_fd.get() < 0,
+            "Failed to create the socket for master"
+        );
 
-        spdlog::debug("Connecting to master {}:{}", master_ip, master_port);
+        spdlog::info("Connecting to master {}:{}", master_ip, master_port);
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(master_port);
-        assert(inet_aton(master_ip.c_str(), &addr.sin_addr));
-        assert(!connect(master_fd.get(), reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)));
+        SPDLOG_ASSERT_DUMP_IF_ERROR(
+            !inet_aton(master_ip.c_str(), &addr.sin_addr),
+            "Failed convert {} to a inet address",
+            master_ip
+        );
+        SPDLOG_ASSERT_DUMP_IF_ERROR(
+            connect(master_fd.get(), reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)),
+            "Failed to connect to master at {}:{}",
+            master_ip, master_port
+        );
         this->master_communication_thread = std::thread{[this]() {
             this->handler(this->master_ip, master_port, this->master_fd, this->master_communication_thread);
         }};
@@ -392,8 +475,6 @@ class PeerNode : public Node {
     const std::string master_ip;
     const std::uint16_t my_port;
 
-    std::uint64_t my_id;
-
     // master <-> client
     FileDescriptor master_fd;
     CancelableThread master_communication_thread{};
@@ -401,7 +482,7 @@ class PeerNode : public Node {
     void listener() override {
         const auto epollfd = Epoll(this->listener_fd, this->listener_thread.evtfd);
         while (!this->listener_thread.stopped.load(std::memory_order_acquire)) {
-            spdlog::debug("Waiting for peers to connect");
+            spdlog::trace("Waiting for peers to connect");
 
             // Wait for event
             const auto [count, events] = epollfd.wait();
@@ -412,15 +493,18 @@ class PeerNode : public Node {
             struct sockaddr_in incomming_peer{};
             socklen_t incomming_peer_size = sizeof(incomming_peer);
             auto peer_fd = FileDescriptor{::accept(this->listener_fd.get(), reinterpret_cast<struct sockaddr*>(&incomming_peer), &incomming_peer_size)};
+            SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+                peer_fd.get() < 0,
+                "Failed to accept a connection"
+            );
             if (peer_fd.get() < 0) {
-                spdlog::error("Failed to accept a connection: ", strerror(errno));
                 continue;
             }
             constexpr auto enabled = 1;
             setsockopt(peer_fd.get(), SOL_SOCKET, SO_KEEPALIVE, &enabled, sizeof(enabled));
 
             const auto addr_str = addr_to_string(incomming_peer.sin_addr);
-            spdlog::debug("Swapper accepting new peer : {}", addr_str);
+            spdlog::trace("Swapper accepting new peer : {}", addr_str);
 
             // What is their ID?
             const auto response = Packet::recv<Packet::MyIDPacket>(peer_fd);
@@ -434,11 +518,11 @@ class PeerNode : public Node {
             const auto peer_port = ntohs(incomming_peer.sin_port);
             this->peers.add(std::move(peer_fd), peer_id, addr_str, peer_port);
 
-            spdlog::debug("Swapper register a peer {}:{}, ID: peer_id: {}", addr_str, peer_port, peer_id);
+            spdlog::info("Swapper register a peer {}:{}, ID: peer_id: {}", addr_str, peer_port, peer_id);
         }
     }
 
-    bool register_peer(const FileDescriptor& fd, const Packet::RegisterPeerPacket& msg) final {
+    bool handle_register_peer(const FileDescriptor& fd, const Packet::RegisterPeerPacket& msg) final {
         if (msg.peer_id > my_id) {  // New peer connected into the federation, connect and make p2p channel
             struct sockaddr_in peer_addr{};
             peer_addr.sin_family = AF_INET;
@@ -446,16 +530,20 @@ class PeerNode : public Node {
             peer_addr.sin_port = htons(msg.port);
 
             auto peer_fd = FileDescriptor{socket(AF_INET, SOCK_STREAM, 0)};
-            if (peer_fd.get() < 0) {
-                spdlog::error("Failed to create the socket for peer : {}", strerror(errno));
-                abort();
-            }
+            SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+                peer_fd.get() < 0,
+                "Failed to create the socket for peer"
+            );
 
             const auto addr_str = addr_to_string(peer_addr.sin_addr);
-            spdlog::debug("Registering and connecting to a new peer : {}:{}", addr_str, msg.port);
+            spdlog::trace("Registering and connecting to a new peer : {}:{}", addr_str, msg.port);
 
             // Connect to the remote peer
-            assert(!connect(peer_fd.get(), reinterpret_cast<struct sockaddr*>(&peer_addr), sizeof(peer_addr)));
+            SPDLOG_ASSERT_DUMP_IF_ERROR(
+                connect(peer_fd.get(), reinterpret_cast<struct sockaddr*>(&peer_addr), sizeof(peer_addr)),
+                "Failed to connect to peer at {}:{}, ID: {}",
+                addr_str, msg.port, msg.peer_id
+            );
 
             // Tell them our ID
             if (Packet::send(peer_fd, Packet::MyIDPacket{ .peer_id = my_id })) {
@@ -463,20 +551,20 @@ class PeerNode : public Node {
                 return true;
             }
 
-            spdlog::debug("New peer {} at {}:{} connected!", msg.peer_id, addr_str, msg.port);
+            spdlog::trace("New peer {} at {}:{} connected!", msg.peer_id, addr_str, msg.port);
 
             // Add to list of peers
             this->peers.add(std::move(peer_fd), msg.peer_id, addr_str, msg.port);
 
-            spdlog::debug("Register a peer {}:{}, ID: {}", addr_str, msg.port, msg.peer_id);
+            spdlog::info("Register a peer {}:{}, ID: {}", addr_str, msg.port, msg.peer_id);
         }
         return Packet::send(fd, Packet::AckPacket{});
     }
 
-    bool ask_port(const FileDescriptor& fd, const Packet::AskPortPacket& msg) final {
+    bool handle_ask_port(const FileDescriptor& fd, const Packet::AskPortPacket& msg) final {
         this->my_id = msg.peer_id;
-        spdlog::debug("Report my port is {}", this->my_port);
-        spdlog::debug("My ID is assigned as {}", this->my_id);
+        spdlog::trace("Report my port is {}", this->my_port);
+        spdlog::trace("My ID is assigned as {}", this->my_id);
         return Packet::send(fd, Packet::ReportPortPacket{ .port = my_port });
     }
 };

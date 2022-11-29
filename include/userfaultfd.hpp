@@ -14,6 +14,7 @@
 #include <string>
 #include <spdlog/spdlog.h>
 
+#include "logging.hpp"
 #include "fd.hpp"
 
 static inline auto userfaultfd(int flags) {
@@ -43,7 +44,10 @@ class UserFaultFd : public FileDescriptor {
             .features = UFFD_FEATURE_THREAD_ID,
             .ioctls = 0
         };
-        assert(!ioctl(this->fd, UFFDIO_API, &api_msg));
+        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+            ioctl(this->fd, UFFDIO_API, &api_msg),
+            "Failed to initialize the UFFD API"
+        );
     }
 
     static inline auto flag_to_string(const std::uint64_t flags) {
@@ -70,7 +74,11 @@ class UserFaultFd : public FileDescriptor {
             .mode = UFFDIO_REGISTER_MODE_WP | UFFDIO_REGISTER_MODE_MINOR,
             .ioctls = 0
         };
-        assert(!ioctl(this->fd, UFFDIO_REGISTER, &register_msg));
+        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+            ioctl(this->fd, UFFDIO_REGISTER, &register_msg),
+            "Failed to watch pages @ {}, length: {} with UFFD API",
+            const_cast<void*>(addr), len
+        );
     }
 
     inline auto stop_watch(volatile void* const addr, const std::size_t len) {
@@ -79,15 +87,25 @@ class UserFaultFd : public FileDescriptor {
             .start = reinterpret_cast<std::uintptr_t>(addr),
             .len = len
         };
-        assert(!ioctl(this->fd, UFFDIO_UNREGISTER, &range_msg));
+        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+            ioctl(this->fd, UFFDIO_UNREGISTER, &range_msg),
+            "Failed to stop watch pages @ {}, length: {} with UFFD API",
+            const_cast<void*>(addr), len
+        );
     }
 
     inline auto read() {
         uffd_msg msg;
-        assert(::read(this->fd, &msg, sizeof(msg)) == sizeof(msg));
+        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+            ::read(this->fd, &msg, sizeof(msg)) != sizeof(msg),
+            "Failed to read a message from UFFD API"
+        );
 
         // Only handle PAGE_FAULT, user should not fork or modify the rdma memory map!
-        assert(msg.event == UFFD_EVENT_PAGEFAULT);
+        SPDLOG_ASSERT_DUMP_IF_ERROR(
+            msg.event != UFFD_EVENT_PAGEFAULT,
+            "Event not supported!"
+        );
 
         spdlog::debug("UserFaultFd captured a page fault from {} @ {}, flags:{}",
             static_cast<pid_t>(msg.arg.pagefault.feat.ptid),
@@ -113,7 +131,11 @@ class UserFaultFd : public FileDescriptor {
             },
             .mode = UFFDIO_WRITEPROTECT_MODE_WP
         };
-        assert(!ioctl(this->fd, UFFDIO_WRITEPROTECT, &wp_msg));
+        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+            ioctl(this->fd, UFFDIO_WRITEPROTECT, &wp_msg),
+            "Failed to write protect pages @ {}, length: {} with UFFD API",
+            const_cast<void*>(addr), len
+        );
     }
 
     inline auto write_unprotect(volatile void* const addr, const std::size_t len) {
@@ -126,7 +148,11 @@ class UserFaultFd : public FileDescriptor {
             },
             .mode = UFFDIO_WRITEPROTECT_MODE_DONTWAKE
         };
-        assert(!ioctl(this->fd, UFFDIO_WRITEPROTECT, &wp_msg));
+        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+            ioctl(this->fd, UFFDIO_WRITEPROTECT, &wp_msg),
+            "Failed to write unprotect pages @ {}, length: {} with UFFD API",
+            const_cast<void*>(addr), len
+        );
     }
 
     inline auto zero(volatile void* const addr, const std::size_t len) {
@@ -140,7 +166,11 @@ class UserFaultFd : public FileDescriptor {
             .mode = UFFDIO_ZEROPAGE_MODE_DONTWAKE,
             .zeropage = 0
         };
-        assert(!ioctl(this->fd, UFFDIO_ZEROPAGE, &zeropg));
+        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+            ioctl(this->fd, UFFDIO_ZEROPAGE, &zeropg),
+            "Failed to zero clear pages @ {}, length: {} with UFFD API",
+            const_cast<void*>(addr), len
+        );
     }
 
     inline auto continue_(volatile void* const addr, const std::size_t len) {
@@ -154,7 +184,11 @@ class UserFaultFd : public FileDescriptor {
             .mode = UFFDIO_CONTINUE_MODE_DONTWAKE,
             .mapped = 0
         };
-        assert(!ioctl(this->fd, UFFDIO_CONTINUE, &cont));
+        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+            ioctl(this->fd, UFFDIO_CONTINUE, &cont),
+            "Failed to solve minor fault pages @ {}, length: {} with UFFD API",
+            const_cast<void*>(addr), len
+        );
     }
 
     inline auto wake(volatile void* const addr, const std::size_t len) {
@@ -164,6 +198,10 @@ class UserFaultFd : public FileDescriptor {
             .start = reinterpret_cast<std::uintptr_t>(addr),
             .len = len
         };
-        assert(!ioctl(this->fd, UFFDIO_WAKE, &range_msg));
+        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+            ioctl(this->fd, UFFDIO_WAKE, &range_msg),
+            "Failed to wait thread waiting on pages @ {}, length: {} with UFFD API",
+            const_cast<void*>(addr), len
+        );
     }
 };

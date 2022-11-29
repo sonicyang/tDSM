@@ -7,6 +7,7 @@
 #include <optional>
 #include <spdlog/spdlog.h>
 
+#include "logging.hpp"
 #include "fd.hpp"
 
 namespace Packet {
@@ -20,9 +21,34 @@ namespace Packet {
         REGISTER_PEER,
         UNREGISTER_PEER,
         MYID,
-        DONE_INIT,
+        ASK_PAGE,
+        SEND_PAGE,
+        MY_PAGE,
+        YOUR_PAGE,
         NUM_PACKET_TYPE
     };
+
+    static auto inline packet_type_to_string(const PacketType type) {
+#define CASE(name) case name: return #name
+        switch(type) {
+            CASE(PING);
+            CASE(PONG);
+            CASE(ASK_PORT);
+            CASE(REPORT_PORT);
+            CASE(DISCONNECT);
+            CASE(ACK);
+            CASE(REGISTER_PEER);
+            CASE(UNREGISTER_PEER);
+            CASE(MYID);
+            CASE(ASK_PAGE);
+            CASE(SEND_PAGE);
+            CASE(MY_PAGE);
+            CASE(YOUR_PAGE);
+            CASE(NUM_PACKET_TYPE);
+        }
+        return "";
+#undef CASE
+    }
 
     struct PacketHeader {
         PacketType type;
@@ -74,14 +100,62 @@ namespace Packet {
         std::uint64_t peer_id = 0x0;
     } __attribute((packed));
 
+    struct AskPagePacket {
+        PacketHeader hdr = { .type = PacketType::ASK_PAGE };
+        std::size_t frame_id = 0x0;
+    } __attribute((packed));
+
+    struct SendPagePacketHdr {
+        PacketHeader hdr = { .type = PacketType::SEND_PAGE };
+        std::size_t frame_id = 0x0;
+    } __attribute((packed));
+
+    struct MyPagePacket {
+        PacketHeader hdr = { .type = PacketType::MY_PAGE };
+        std::size_t frame_id = 0x0;
+    } __attribute((packed));
+
+    struct YourPagePacket {
+        PacketHeader hdr = { .type = PacketType::YOUR_PAGE };
+        std::size_t frame_id = 0x0;
+    } __attribute((packed));
+
     // XXX: Add traits as protection
     template<typename T>
-    static inline auto send(const FileDescriptor& fd, const T& packet) {
+    static inline auto send(const FileDescriptor& fd, const T& packet, const void* const data = nullptr, const std::size_t length = 0) {
         auto remain = sizeof(T);
         while (remain) {
             const auto ret = ::send(fd.get(), reinterpret_cast<const std::uint8_t*>(&packet) + (sizeof(T) - remain), remain, 0);
-            if (ret <= 0) {
-                spdlog::error("Failed to send a packet: {}", strerror(errno));
+            SPDLOG_DUMP_IF_ERROR_WITH_ERRNO(ret <= 0, "Failed to send a packet") {
+                return true;
+            }
+            remain -= static_cast<decltype(remain)>(ret);
+        }
+
+        remain = length;
+        while (data != nullptr && remain) {
+            const auto ret = ::send(fd.get(), reinterpret_cast<const std::uint8_t*>(data) + (length - remain), remain, 0);
+            SPDLOG_DUMP_IF_ERROR_WITH_ERRNO(ret <= 0, "Failed to send a packet") {
+                return true;
+            }
+            remain -= static_cast<decltype(remain)>(ret);
+        }
+        return false;
+    }
+
+    static inline std::optional<PacketType> peek_packet_type(const FileDescriptor& fd) {
+        PacketHeader hdr;
+        if (recv(fd.get(), &hdr, sizeof(hdr), MSG_PEEK) != sizeof(hdr)) {
+            return {};
+        }
+        return static_cast<PacketType>(hdr.type);
+    }
+
+    static inline bool recv(const FileDescriptor& fd, void* const data, const std::size_t length) {
+        auto remain = length;
+        while (data != nullptr && remain) {
+            const auto ret = ::recv(fd.get(), reinterpret_cast<std::uint8_t*>(data) + (length - remain), remain, 0);
+            SPDLOG_DUMP_IF_ERROR_WITH_ERRNO(ret <= 0, "Failed to recv a packet: {}") {
                 return true;
             }
             remain -= static_cast<decltype(remain)>(ret);
@@ -92,27 +166,14 @@ namespace Packet {
     template<typename T>
     static inline std::optional<T> recv(const FileDescriptor& fd) {
         T packet;
-        auto remain = sizeof(T);
-        while (remain) {
-            const auto ret = ::recv(fd.get(), reinterpret_cast<std::uint8_t*>(&packet) + (sizeof(T) - remain), remain, 0);
-            if (ret <= 0) {
-                spdlog::error("Failed to recv a packet: {}", strerror(errno));
-                return {};
-            }
-            remain -= static_cast<decltype(remain)>(ret);
+        if (recv(fd, &packet, sizeof(T))) {
+            return {};
         }
 
         if (packet.hdr.type != T{}.hdr.type) {
             return {};
         }
-        return packet;
-    }
 
-    static inline std::optional<PacketType> peek_packet_type(const FileDescriptor& fd) {
-        PacketHeader hdr;
-        if (recv(fd.get(), &hdr, sizeof(hdr), MSG_PEEK) != sizeof(hdr)) {
-            return {};
-        }
-        return static_cast<PacketType>(hdr.type);
+        return packet;
     }
 }  // Packet
