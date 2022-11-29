@@ -10,6 +10,8 @@
 #include <absl/flags/flag.h>
 #include <absl/flags/parse.h>
 #include <absl/flags/usage.h>
+#include <spdlog/spdlog.h>
+#include <spdlog/stopwatch.h>
 
 #include <algorithm>
 #include <atomic>
@@ -23,6 +25,8 @@
 #include <vector>
 #include <set>
 
+#include "lz4.h"
+
 #include "configs.hpp"
 #include "logging.hpp"
 #include "fd.hpp"
@@ -30,6 +34,8 @@
 #include "cancelable_thread.hpp"
 #include "node.hpp"
 #include "timerfd.hpp"
+
+#define COMPRESSION
 
 // initialized by the ELF constructor
 extern std::string master_ip;
@@ -209,9 +215,9 @@ class Swapper : public PeerNode {
     std::unordered_map<Location_t, std::pair<bool, std::condition_variable>, LocationHash> out_standing_locks{};
     std::unordered_map<Location_t, std::pair<bool, std::condition_variable>, LocationHash> out_standing_unlocks{};
 
-    //static inline std::binary_semaphore semaphores[n_pages];
-
     // Utility functions
+
+
     auto inline ask_page(const std::size_t frame_id) {
         // Download the page data from owner
         spdlog::trace("Asking frame {}", frame_id);
@@ -271,12 +277,32 @@ class Swapper : public PeerNode {
         const auto port      = peer.value()->port;
 
         const auto frame_id = msg.frame_id;
+        const auto base_address = get_frame_address(frame_id);
         if (this->states[frame_id].load(std::memory_order_acquire) == state::OWNED) {
+#ifdef COMPRESSION
+            constexpr auto data_max_size = LZ4_COMPRESSBOUND(page_size);
+            std::uint8_t compressed[data_max_size];
+            {
+                const auto send_size = static_cast<std::size_t>(LZ4_compress_default(reinterpret_cast<char*>(base_address), reinterpret_cast<char*>(compressed), page_size, data_max_size));
+                SPDLOG_ASSERT_DUMP_IF_ERROR(
+                    send_size == 0, "Failed to compress page data"
+                );
+
+                spdlog::trace("Compression {} to {}, {}%", page_size, send_size, static_cast<double>(page_size - send_size) / page_size * 100);
+
+                SPDLOG_ASSERT_DUMP_IF_ERROR(
+                    Packet::send(fd, Packet::SendPagePacketHdr{ .frame_id = frame_id, .size = send_size }, compressed, send_size),
+                    "Failed send a page to peer {}:{}, ID {}",
+                    addr_str, port, peer_id
+                );
+            }
+#else
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::send(fd, Packet::SendPagePacketHdr{ .frame_id = frame_id }, get_frame_address(frame_id), page_size),
+                Packet::send(fd, Packet::SendPagePacketHdr{ .frame_id = frame_id, .size = page_size }, base_address, page_size),
                 "Failed send a page to peer {}:{}, ID {}",
                 addr_str, port, peer_id
             );
+#endif
         }
         return false;
     }
@@ -285,25 +311,53 @@ class Swapper : public PeerNode {
         // Someone is sending a data of a page to me
         const auto frame_id = msg.frame_id;
         bool request_outstanding = true;
+
+#ifdef COMPRESSION
+        constexpr auto data_max_size = LZ4_COMPRESSBOUND(page_size);
+        std::uint8_t compressed[data_max_size];
+#else
+        std::uint8_t dummy[page_size];
+#endif
+
         if(this->out_standing_reads[frame_id].compare_exchange_strong(request_outstanding, false, std::memory_order_seq_cst)) {
             const auto base_address = get_frame_address(frame_id);
+#ifdef COMPRESSION
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::recv(fd, base_address, page_size),
+                Packet::recv(fd, compressed, msg.size),
                 "Failed recv a page, frame = {}",
                 frame_id
             );
+
+            const auto recv_size = LZ4_decompress_safe(reinterpret_cast<char*>(compressed), reinterpret_cast<char*>(base_address), msg.size, page_size);
+            SPDLOG_ASSERT_DUMP_IF_ERROR(
+                recv_size == 0, "Failed to decompress page data"
+            );
+#else
+            SPDLOG_ASSERT_DUMP_IF_ERROR(
+                Packet::recv(fd, base_address, msg.size),
+                "Failed recv a page, frame = {}",
+                frame_id
+            );
+#endif
 
             this->faultfd.write_protect(base_address, page_size);
             this->set_frame_state_shared(frame_id);
             this->faultfd.wake(base_address, page_size);
         } else {
             spdlog::warn("Frame {} is received twice, discarding", frame_id);
-            std::uint8_t dummy[page_size];
+#ifdef COMPRESSION
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::recv(fd, dummy, page_size),
+                Packet::recv(fd, compressed, msg.size),
                 "Failed recv a page, frame = {}",
                 frame_id
             );
+#else
+            SPDLOG_ASSERT_DUMP_IF_ERROR(
+                Packet::recv(fd, dummy, msg.size),
+                "Failed recv a page, frame = {}",
+                frame_id
+            );
+#endif
         }
         return false;
     }

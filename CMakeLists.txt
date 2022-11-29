@@ -7,6 +7,8 @@ set(CMAKE_CXX_STANDARD 20)
 find_package(absl REQUIRED)
 find_package(spdlog REQUIRED)
 
+add_subdirectory(3rdparty/lz4/build/cmake)
+
 function(add_rdma_executable NAME)
     add_executable(${NAME} ${ARGN})
 
@@ -17,6 +19,7 @@ function(add_rdma_executable NAME)
         absl::flags
         absl::flags_parse
         absl::flags_usage
+        lz4_static
     )
     target_link_options(${NAME} PRIVATE "-no-pie")
 

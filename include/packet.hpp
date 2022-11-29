@@ -7,6 +7,7 @@
 #include <optional>
 #include <spdlog/spdlog.h>
 
+#include "configs.hpp"
 #include "logging.hpp"
 #include "fd.hpp"
 
@@ -114,6 +115,7 @@ namespace Packet {
     struct SendPagePacketHdr {
         PacketHeader hdr = { .type = PacketType::SEND_PAGE };
         std::size_t frame_id = 0x0;
+        std::size_t size = page_size;
     } __attribute((packed));
 
     struct MyPagePacket {
