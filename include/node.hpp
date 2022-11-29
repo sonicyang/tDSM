@@ -17,8 +17,10 @@
 #include <map>
 #include <functional>
 #include <mutex>
+#include <shared_mutex>
 #include <condition_variable>
 #include <unordered_map>
+#include <semaphore>
 
 #include "configs.hpp"
 #include "logging.hpp"
@@ -173,6 +175,9 @@ class Node {
             case Packet::PacketType::LOCK:
                 err = forward_packet<Packet::LockPacket>(fd, std::mem_fn(&Node::handle_lock));
                 break;
+            case Packet::PacketType::NO_LOCK:
+                err = forward_packet<Packet::NoLockPacket>(fd, std::mem_fn(&Node::handle_no_lock));
+                break;
             case Packet::PacketType::UNLOCK:
                 err = forward_packet<Packet::UnlockPacket>(fd, std::mem_fn(&Node::handle_unlock));
                 break;
@@ -256,6 +261,11 @@ class Node {
 
     virtual bool handle_lock(const FileDescriptor&, const Packet::LockPacket&) {
         spdlog::warn("Ignoring a LOCK packet");
+        return false;
+    }
+
+    virtual bool handle_no_lock(const FileDescriptor&, const Packet::NoLockPacket&) {
+        spdlog::warn("Ignoring a NO_LOCK packet");
         return false;
     }
 
@@ -391,12 +401,9 @@ class MasterNode : public Node {
     }
 
     // Locks, one bit per byte, dictionary address at 64 bytes boundary
-    struct LockState {
-        std::size_t mask{};
-        std::condition_variable cv{};
-    };
-    mutable std::mutex lock_mutex[n_pages]{};
-    std::unordered_map<std::uintptr_t, LockState> lock_states[n_pages];
+    mutable std::shared_mutex page_mutex[n_pages]{};
+    mutable std::mutex state_mutex[n_pages]{};
+    std::unordered_map<std::uintptr_t, std::mutex> line_mutex[n_pages];
 
     bool handle_lock(const FileDescriptor& fd, const Packet::LockPacket& msg) final {
         auto& peer           = this->peers[fd.get()];
@@ -406,19 +413,34 @@ class MasterNode : public Node {
 
         const auto frame_id = get_frame_number(reinterpret_cast<void*>(msg.address));
         const auto aligned_64_address = msg.address & ~(0x40 - 1);  // round down to 64 bytes boundary
-        const auto mask = ((std::uint64_t{1} << msg.size) - 1) << (msg.address - aligned_64_address);
+        if (msg.address == reinterpret_cast<std::uintptr_t>(get_frame_address(frame_id)) && msg.size == page_size) {
+            this->page_mutex[frame_id].lock();
+            SPDLOG_ASSERT_DUMP_IF_ERROR(
+                Packet::send(fd, msg),
+                "Failed notify peer {}:{}, ID {} that lock is acquired",
+                addr_str, port, peer_id
+            );
+        } else if (msg.address == aligned_64_address && msg.size == 64) {
+            this->page_mutex[frame_id].lock_shared();
+            {
+                std::scoped_lock<std::mutex> lk{this->state_mutex[frame_id]};
+                this->line_mutex[frame_id][aligned_64_address].lock();
+            }
 
-        std::unique_lock<std::mutex> lk{this->lock_mutex[frame_id]};
-        this->lock_states[frame_id][aligned_64_address].cv.wait(lk, [this, mask, frame_id, aligned_64_address] { return !(this->lock_states[frame_id][aligned_64_address].mask & mask); });
-        this->lock_states[frame_id][aligned_64_address].mask |= mask;
+            spdlog::trace("Locking 0x{:x}, {} bytes for {}:{}, ID: {}", msg.address, msg.size, addr_str, port, peer_id);
 
-        spdlog::trace("Locking 0x{:x}, {} bytes for {}:{}, ID: {}", msg.address, msg.size, addr_str, port, peer_id);
-
-        SPDLOG_ASSERT_DUMP_IF_ERROR(
-            Packet::send(fd, msg),
-            "Failed notify peer {}:{}, ID {} that lock is acquired",
-            addr_str, port, peer_id
-        );
+            SPDLOG_ASSERT_DUMP_IF_ERROR(
+                Packet::send(fd, msg),
+                "Failed notify peer {}:{}, ID {} that lock is acquired",
+                addr_str, port, peer_id
+            );
+        } else {
+            SPDLOG_ASSERT_DUMP_IF_ERROR(
+                Packet::send(fd, Packet::NoLockPacket{ .address = msg.address, .size = msg.size }),
+                "Failed notify peer {}:{}, ID {} that lock failed",
+                addr_str, port, peer_id
+            );
+        }
 
         return false;
     }
@@ -431,24 +453,32 @@ class MasterNode : public Node {
 
         const auto frame_id = get_frame_number(reinterpret_cast<void*>(msg.address));
         const auto aligned_64_address = msg.address & ~(0x40 - 1);  // round down to 64 bytes boundary
-        const auto mask = ((std::uint64_t{1} << msg.size) - 1) << (msg.address - aligned_64_address);
 
-        std::unique_lock<std::mutex> lk{this->lock_mutex[frame_id]};
-        if ((this->lock_states[frame_id][aligned_64_address].mask & mask) != mask) {
+        if (msg.address == reinterpret_cast<std::uintptr_t>(get_frame_address(frame_id)) && msg.size == page_size) {
+            this->page_mutex[frame_id].unlock();
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::send(fd, Packet::NoUnlockPacket{ .address = msg.address, .size = msg.size }),
-                "Failed notify peer {}:{}, ID {} that unlock failed",
+                Packet::send(fd, msg),
+                "Failed notify peer {}:{}, ID {} that unlock succeed",
+                addr_str, port, peer_id
+            );
+        } else if (msg.address == aligned_64_address && msg.size == 64) {
+            spdlog::trace("Unlocking 0x{:x}, {} bytes for {}:{}, ID: {}", msg.address, msg.size, addr_str, port, peer_id);
+
+            {
+                std::scoped_lock<std::mutex> lk{this->state_mutex[frame_id]};
+                this->line_mutex[frame_id][aligned_64_address].unlock();
+            }
+            this->page_mutex[frame_id].unlock_shared();
+
+            SPDLOG_ASSERT_DUMP_IF_ERROR(
+                Packet::send(fd, msg),
+                "Failed notify peer {}:{}, ID {} that unlock succeed",
                 addr_str, port, peer_id
             );
         } else {
-            spdlog::trace("Unlocking 0x{:x}, {} bytes for {}:{}, ID: {}", msg.address, msg.size, addr_str, port, peer_id);
-
-            this->lock_states[frame_id][aligned_64_address].mask &= ~mask;
-            this->lock_states[frame_id][aligned_64_address].cv.notify_all();  // XXX: Probable Thundering herd problem?
-
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::send(fd, Packet::UnlockPacket{ .address = msg.address, .size = msg.size }),
-                "Failed notify peer {}:{}, ID {} that unlock succeed",
+                Packet::send(fd, Packet::NoUnlockPacket{ .address = msg.address, .size = msg.size }),
+                "Failed notify peer {}:{}, ID {} that unlock failed",
                 addr_str, port, peer_id
             );
         }

@@ -27,6 +27,7 @@ namespace Packet {
         MY_PAGE,
         YOUR_PAGE,
         LOCK,
+        NO_LOCK,
         UNLOCK,
         NO_UNLOCK,
         NUM_PACKET_TYPE
@@ -49,6 +50,7 @@ namespace Packet {
             CASE(MY_PAGE);
             CASE(YOUR_PAGE);
             CASE(LOCK);
+            CASE(NO_LOCK);
             CASE(UNLOCK);
             CASE(NO_UNLOCK);
             CASE(NUM_PACKET_TYPE);
@@ -130,6 +132,12 @@ namespace Packet {
 
     struct LockPacket {
         PacketHeader hdr = { .type = PacketType::LOCK };
+        std::uintptr_t address = 0x0;
+        std::size_t size = 0x0;
+    } __attribute((packed));
+
+    struct NoLockPacket {
+        PacketHeader hdr = { .type = PacketType::NO_LOCK };
         std::uintptr_t address = 0x0;
         std::size_t size = 0x0;
     } __attribute((packed));

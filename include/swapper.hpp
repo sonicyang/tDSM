@@ -63,43 +63,45 @@ class Swapper : public PeerNode {
     template<typename T>
     inline auto lock(volatile T* ptr) {
         const auto address = reinterpret_cast<std::uintptr_t>(ptr);
-        const auto size = sizeof(T);
+        const auto size = 64;
 
-        SPDLOG_ASSERT_DUMP_IF_ERROR(
-            Packet::send(this->master_fd, Packet::LockPacket{ .address = address, .size = size }),
-            "Failed send locking message for 0x{:x}, size: {}",
-            address, size
-        );
-
-        {
-            std::unique_lock<std::mutex> lk{this->lock_mutex};
-            auto& ref = this->out_standing_locks[std::make_tuple(address, size)];
-            ref.first = false;
-            ref.second.wait(lk, [&ref] { return ref.first; });
-            this->out_standing_locks.erase(std::make_tuple(address, size));
+        const auto line_boundary = address & ~(size - 1);
+        if (address != line_boundary) {
+            spdlog::warn("Locking the whole 64bytes line 0x{:x} resides, possible deadlock");
         }
 
-        return;
+        this->lock(line_boundary, size);
+    }
+
+    template<typename T>
+    inline auto lock_page(volatile T* ptr) {
+        const auto address = reinterpret_cast<std::uintptr_t>(ptr);
+        const auto size = page_size;
+
+        const auto page_boundary = round_down_to_page_boundary(address);
+        if (address != page_boundary) {
+            spdlog::warn("Locking the whole page 0x{:x} resides");
+        }
+
+        this->lock(page_boundary, size);
     }
 
     template<typename T>
     inline auto unlock(volatile T* ptr) {
         const auto address = reinterpret_cast<std::uintptr_t>(ptr);
-        const auto size = sizeof(T);
+        const auto size = 64;
 
-        SPDLOG_ASSERT_DUMP_IF_ERROR(
-            Packet::send(this->master_fd, Packet::UnlockPacket{ .address = address, .size = size }),
-            "Failed send unlocking message for 0x{:x}, size: {}",
-            address, size
-        );
+        const auto line_boundary = address & ~(size - 1);
+        this->unlock(line_boundary, size);
+    }
 
-        {
-            std::unique_lock<std::mutex> lk{this->unlock_mutex};
-            auto& ref = this->out_standing_unlocks[std::make_tuple(address, size)];
-            ref.first = false;
-            ref.second.wait(lk, [&ref] { return ref.first; });
-            this->out_standing_unlocks.erase(std::make_tuple(address, size));
-        }
+    template<typename T>
+    inline auto unlock_page(volatile T* ptr) {
+        const auto address = reinterpret_cast<std::uintptr_t>(ptr);
+        const auto size = page_size;
+
+        const auto page_boundary = round_down_to_page_boundary(address);
+        this->unlock(page_boundary, size);
     }
 
  private:
@@ -216,7 +218,40 @@ class Swapper : public PeerNode {
     std::unordered_map<Location_t, std::pair<bool, std::condition_variable>, LocationHash> out_standing_unlocks{};
 
     // Utility functions
+    inline auto lock(const std::uintptr_t address, const std::size_t size) {
+        SPDLOG_ASSERT_DUMP_IF_ERROR(
+            Packet::send(this->master_fd, Packet::LockPacket{ .address = address, .size = size }),
+            "Failed send locking message for 0x{:x}, size: {}",
+            address, size
+        );
 
+        {
+            std::unique_lock<std::mutex> lk{this->lock_mutex};
+            const auto key = std::make_tuple(address, size);
+            auto& ref = this->out_standing_locks[key];
+            ref.first = false;
+            ref.second.wait(lk, [&ref] { return ref.first; });
+            this->out_standing_locks.erase(key);
+        }
+
+        return;
+    }
+
+    inline auto unlock(const std::uintptr_t address, const std::size_t size) {
+        SPDLOG_ASSERT_DUMP_IF_ERROR(
+            Packet::send(this->master_fd, Packet::UnlockPacket{ .address = address, .size = size }),
+            "Failed send unlocking message for 0x{:x}, size: {}",
+            address, size
+        );
+
+        {
+            std::unique_lock<std::mutex> lk{this->unlock_mutex};
+            auto& ref = this->out_standing_unlocks[std::make_tuple(address, size)];
+            ref.first = false;
+            ref.second.wait(lk, [&ref] { return ref.first; });
+            this->out_standing_unlocks.erase(std::make_tuple(address, size));
+        }
+    }
 
     auto inline ask_page(const std::size_t frame_id) {
         // Download the page data from owner
@@ -566,6 +601,11 @@ class Swapper : public PeerNode {
         return false;
     }
 
+    bool handle_no_lock(const FileDescriptor&, const Packet::NoLockPacket& msg) final {
+        SPDLOG_ASSERT_DUMP_IF_ERROR(true, "Failed to Lock 0x{:x}, size: {}, not on page or 64 byte boundary?", msg.address, msg.size);
+        return false;
+    }
+
     bool handle_unlock(const FileDescriptor&, const Packet::UnlockPacket& msg) final {
         {
             std::scoped_lock<std::mutex> lk{this->unlock_mutex};
@@ -577,7 +617,7 @@ class Swapper : public PeerNode {
     }
 
     bool handle_no_unlock(const FileDescriptor&, const Packet::NoUnlockPacket& msg) final {
-        SPDLOG_ASSERT_DUMP_IF_ERROR(true, "Failed to Unlock 0x{:x}, size: {}, unlock something that is not locked!", msg.address, msg.size);
+        SPDLOG_ASSERT_DUMP_IF_ERROR(true, "Failed to Unlock 0x{:x}, size: {}, unlock something that is not locked?", msg.address, msg.size);
         return false;
     }
 };
