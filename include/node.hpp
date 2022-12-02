@@ -275,31 +275,31 @@ class Node {
     }
 };
 
-class MasterNode : public Node {
+class master_node : public Node {
  public:
-    static MasterNode& get() {
-        static MasterNode instance;
+    static master_node& get() {
+        static master_node instance;
         return instance;
     }
 
  private:
-    MasterNode() : Node(master_port) {}
-    ~MasterNode() override {}
+    master_node() : Node(master_port) {}
+    ~master_node() override {}
 
-    MasterNode(const MasterNode&) = delete;
-    MasterNode& operator=(const MasterNode&) = delete;
-    MasterNode(MasterNode&&) = delete;
-    MasterNode& operator=(MasterNode&&) = delete;
+    master_node(const master_node&) = delete;
+    master_node& operator=(const master_node&) = delete;
+    master_node(master_node&&) = delete;
+    master_node& operator=(master_node&&) = delete;
 
     // The clients for master
-    struct Peer {
+    struct peer {
         std::size_t id;
         std::string addr_str;
         struct in_addr addr;
         std::uint16_t port;
         sys::file_descriptor fd;
         utils::cancelable_thread thread{};
-        Peer(
+        peer(
             const std::size_t id_,
             const std::string& addr_str_,
             const struct in_addr& addr_,
@@ -307,14 +307,14 @@ class MasterNode : public Node {
             sys::file_descriptor&& fd_) : id(id_), addr_str(addr_str_), addr(addr_), port(port_), fd(std::move(fd_)) {}
     };
     std::atomic_uint64_t number_of_peers{0};
-    std::map<int, std::unique_ptr<Peer>> peers{};
+    std::map<int, std::unique_ptr<peer>> peers{};
     mutable std::mutex peers_mutex{};
 
     inline decltype(auto) add_peer(const std::uint64_t peer_id, const std::string& addr_str, const struct in_addr& addr, const std::uint16_t port, sys::file_descriptor&& fd) {
         std::scoped_lock<std::mutex> lk{this->peers_mutex};
         // Add to the list of clients/peers
         const auto fd_value = fd.get();
-        auto& ref = peers.emplace(fd_value, std::make_unique<Peer>(
+        auto& ref = peers.emplace(fd_value, std::make_unique<peer>(
             peer_id,
             addr_str,
             addr,
@@ -482,16 +482,16 @@ class MasterNode : public Node {
     }
 };
 
-class PeerNode : public Node {
+class peer_node : public Node {
  protected:
-    class Peers {
+    class peers {
          public:
             template<typename... Ts>
             auto inline add(sys::file_descriptor&& fd, Ts&&... ts) {
                 std::scoped_lock<std::mutex> lk{this->mutex};
                 this->epollfd.add_fd(fd);
                 const auto fd_value = fd.get();
-                this->peers.emplace(fd_value, Peer{std::move(fd), std::forward<Ts>(ts)...});
+                this->peers.emplace(fd_value, peer{std::move(fd), std::forward<Ts>(ts)...});
             }
 
             auto inline del(sys::file_descriptor& fd) {
@@ -519,19 +519,19 @@ class PeerNode : public Node {
                 return this->epollfd;
             }
 
-            struct Peer {
+            struct peer {
                 sys::file_descriptor fd;
                 std::uint64_t id;
                 std::string addr_str;
                 std::uint16_t port;
-                Peer(sys::file_descriptor&& fd_, const std::uint64_t id_, const std::string& addr_str_, const std::uint16_t port_)
+                peer(sys::file_descriptor&& fd_, const std::uint64_t id_, const std::string& addr_str_, const std::uint16_t port_)
                     : fd(std::move(fd_)), id(id_), addr_str(addr_str_), port(port_) {}
             };
-            std::unordered_map<int, Peer> peers{};
+            std::unordered_map<int, peer> peers{};
             sys::epoll epollfd{};
             mutable std::mutex mutex{};
 
-            std::optional<Peer*> operator[](const int fd_to_find) {
+            std::optional<peer*> operator[](const int fd_to_find) {
                 std::scoped_lock<std::mutex> lk{this->mutex};
                 if (this->peers.contains(fd_to_find)) {
                     return {&this->peers.at(fd_to_find)};
@@ -555,7 +555,7 @@ class PeerNode : public Node {
             }
     };
 
-    Peers peers{};
+    peers peers{};
     std::uint64_t my_id{};
     const std::string master_ip;
     const std::uint16_t my_port;
@@ -564,7 +564,7 @@ class PeerNode : public Node {
     sys::file_descriptor master_fd;
     utils::cancelable_thread master_communication_thread{};
 
-    PeerNode(const std::string master_ip_, const std::uint16_t my_port_) : Node(my_port_), master_ip(master_ip_), my_port(my_port_), master_fd(socket(AF_INET, SOCK_STREAM, 0)) {
+    peer_node(const std::string master_ip_, const std::uint16_t my_port_) : Node(my_port_), master_ip(master_ip_), my_port(my_port_), master_fd(socket(AF_INET, SOCK_STREAM, 0)) {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             master_fd.get() < 0,
             "Failed to create the socket for master"
@@ -590,12 +590,12 @@ class PeerNode : public Node {
         }};
     }
 
-    ~PeerNode() override {}
+    ~peer_node() override {}
 
-    PeerNode(const PeerNode&) = delete;
-    PeerNode& operator=(const PeerNode&) = delete;
-    PeerNode(PeerNode&&) = delete;
-    PeerNode& operator=(PeerNode&&) = delete;
+    peer_node(const peer_node&) = delete;
+    peer_node& operator=(const peer_node&) = delete;
+    peer_node(peer_node&&) = delete;
+    peer_node& operator=(peer_node&&) = delete;
 
  private:
     void listener() override {

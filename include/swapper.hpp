@@ -43,12 +43,12 @@ namespace tDSM {
 extern std::string master_ip;
 extern std::uint16_t my_port;
 
-class swapper : public PeerNode {
+class swapper : public peer_node {
  public:
     static swapper& get(bool master = false) {
         // order matters, master must start before swapper, which is a peer
         if (master) {
-            MasterNode::get();
+            master_node::get();
         }
         static swapper instance{master};
         return instance;
@@ -107,7 +107,7 @@ class swapper : public PeerNode {
     }
 
  private:
-    swapper(bool is_master_) : PeerNode(tDSM::master_ip, tDSM::my_port), is_master(is_master_), backing_memory_fd(memfd_create("test", 0)) {
+    swapper(bool is_master_) : peer_node(tDSM::master_ip, tDSM::my_port), is_master(is_master_), backing_memory_fd(memfd_create("test", 0)) {
         spdlog::info("Initializing RDMA swapper...");
 
         spdlog::info("Creating backing memory...");
