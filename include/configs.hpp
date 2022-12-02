@@ -29,7 +29,7 @@ auto inline get_frame_number(void* const addr) {
     const auto uaddr = reinterpret_cast<std::uintptr_t>(addr);
     const auto base = reinterpret_cast<std::uintptr_t>(rdma_memory);
     // sanity check
-    SPDLOG_ASSERT_DUMP_IF_ERROR(
+    tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
         !(base <= uaddr && uaddr < base + rdma_size),
         "The address is out-of-bound!"
     );
@@ -39,7 +39,7 @@ auto inline get_frame_number(void* const addr) {
 auto inline get_frame_address(const std::size_t frame_id) {
     const auto base = reinterpret_cast<std::uintptr_t>(rdma_memory);
     // sanity check
-    SPDLOG_ASSERT_DUMP_IF_ERROR(
+    tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
         !(frame_id < n_pages),
         "The frame id is out-of-bound!"
     );

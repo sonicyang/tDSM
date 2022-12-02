@@ -122,7 +122,7 @@ namespace tDSM::packet {
         auto remain = sizeof(T);
         while (remain) {
             const auto ret = ::send(fd.get(), reinterpret_cast<const std::uint8_t*>(&packet) + (sizeof(T) - remain), remain, 0);
-            SPDLOG_DUMP_IF_ERROR_WITH_ERRNO(ret <= 0, "Failed to send a packet") {
+            tDSM_SPDLOG_DUMP_IF_ERROR_WITH_ERRNO(ret <= 0, "Failed to send a packet") {
                 return true;
             }
             remain -= static_cast<decltype(remain)>(ret);
@@ -131,7 +131,7 @@ namespace tDSM::packet {
         remain = length;
         while (data != nullptr && remain) {
             const auto ret = ::send(fd.get(), reinterpret_cast<const std::uint8_t*>(data) + (length - remain), remain, 0);
-            SPDLOG_DUMP_IF_ERROR_WITH_ERRNO(ret <= 0, "Failed to send a packet") {
+            tDSM_SPDLOG_DUMP_IF_ERROR_WITH_ERRNO(ret <= 0, "Failed to send a packet") {
                 return true;
             }
             remain -= static_cast<decltype(remain)>(ret);
@@ -151,7 +151,7 @@ namespace tDSM::packet {
         auto remain = length;
         while (data != nullptr && remain) {
             const auto ret = ::recv(fd.get(), reinterpret_cast<std::uint8_t*>(data) + (length - remain), remain, 0);
-            SPDLOG_DUMP_IF_ERROR_WITH_ERRNO(ret <= 0, "Failed to recv a packet: {}") {
+            tDSM_SPDLOG_DUMP_IF_ERROR_WITH_ERRNO(ret <= 0, "Failed to recv a packet: {}") {
                 return true;
             }
             remain -= static_cast<decltype(remain)>(ret);

@@ -13,7 +13,7 @@
 class TimerFd : public FileDescriptor {
  public:
     TimerFd() : FileDescriptor(::timerfd_create(CLOCK_MONOTONIC, 0)) {
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(this->fd < 0, "Failed to create timerfd");
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(this->fd < 0, "Failed to create timerfd");
     }
 
     TimerFd(const TimerFd&) = delete;
@@ -26,7 +26,7 @@ class TimerFd : public FileDescriptor {
             .it_interval = timespec{},
             .it_value = deadline
         };
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ::timerfd_settime(this->fd, flags, &utmr, nullptr),
             "Failed to arm the timerfd");
     }
@@ -36,7 +36,7 @@ class TimerFd : public FileDescriptor {
             .it_interval = start,
             .it_value = period
         };
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ::timerfd_settime(this->fd, flags, &utmr, nullptr),
             "Failed to arm the timerfd");
     }
@@ -46,7 +46,7 @@ class TimerFd : public FileDescriptor {
             .it_interval = timespec{},
             .it_value = timespec{}
         };
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ::timerfd_settime(this->fd, 0, &utmr, nullptr),
             "Failed to disarm the timerfd");
     }

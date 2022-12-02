@@ -45,7 +45,7 @@ class UserFaultFd : public FileDescriptor {
             .features = UFFD_FEATURE_THREAD_ID,
             .ioctls = 0
         };
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ioctl(this->fd, UFFDIO_API, &api_msg),
             "Failed to initialize the UFFD API"
         );
@@ -75,7 +75,7 @@ class UserFaultFd : public FileDescriptor {
             .mode = UFFDIO_REGISTER_MODE_WP | UFFDIO_REGISTER_MODE_MINOR,
             .ioctls = 0
         };
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ioctl(this->fd, UFFDIO_REGISTER, &register_msg),
             "Failed to watch pages @ {}, length: {} with UFFD API",
             const_cast<void*>(addr), len
@@ -88,7 +88,7 @@ class UserFaultFd : public FileDescriptor {
             .start = reinterpret_cast<std::uintptr_t>(addr),
             .len = len
         };
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ioctl(this->fd, UFFDIO_UNREGISTER, &range_msg),
             "Failed to stop watch pages @ {}, length: {} with UFFD API",
             const_cast<void*>(addr), len
@@ -97,13 +97,13 @@ class UserFaultFd : public FileDescriptor {
 
     inline auto read() {
         uffd_msg msg;
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ::read(this->fd, &msg, sizeof(msg)) != sizeof(msg),
             "Failed to read a message from UFFD API"
         );
 
         // Only handle PAGE_FAULT, user should not fork or modify the rdma memory map!
-        SPDLOG_ASSERT_DUMP_IF_ERROR(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
             msg.event != UFFD_EVENT_PAGEFAULT,
             "Event not supported!"
         );
@@ -132,7 +132,7 @@ class UserFaultFd : public FileDescriptor {
             },
             .mode = UFFDIO_WRITEPROTECT_MODE_WP
         };
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ioctl(this->fd, UFFDIO_WRITEPROTECT, &wp_msg),
             "Failed to write protect pages @ {}, length: {} with UFFD API",
             const_cast<void*>(addr), len
@@ -149,7 +149,7 @@ class UserFaultFd : public FileDescriptor {
             },
             .mode = UFFDIO_WRITEPROTECT_MODE_DONTWAKE
         };
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ioctl(this->fd, UFFDIO_WRITEPROTECT, &wp_msg),
             "Failed to write unprotect pages @ {}, length: {} with UFFD API",
             const_cast<void*>(addr), len
@@ -167,7 +167,7 @@ class UserFaultFd : public FileDescriptor {
             .mode = UFFDIO_ZEROPAGE_MODE_DONTWAKE,
             .zeropage = 0
         };
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ioctl(this->fd, UFFDIO_ZEROPAGE, &zeropg),
             "Failed to zero clear pages @ {}, length: {} with UFFD API",
             const_cast<void*>(addr), len
@@ -185,7 +185,7 @@ class UserFaultFd : public FileDescriptor {
             .mode = UFFDIO_CONTINUE_MODE_DONTWAKE,
             .mapped = 0
         };
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ioctl(this->fd, UFFDIO_CONTINUE, &cont),
             "Failed to solve minor fault pages @ {}, length: {} with UFFD API",
             const_cast<void*>(addr), len
@@ -199,7 +199,7 @@ class UserFaultFd : public FileDescriptor {
             .start = reinterpret_cast<std::uintptr_t>(addr),
             .len = len
         };
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ioctl(this->fd, UFFDIO_WAKE, &range_msg),
             "Failed to wait thread waiting on pages @ {}, length: {} with UFFD API",
             const_cast<void*>(addr), len

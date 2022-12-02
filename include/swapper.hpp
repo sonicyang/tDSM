@@ -113,22 +113,22 @@ class swapper : public PeerNode {
         spdlog::info("Creating backing memory...");
 
         // Using memfd as the backing memory to allow retaining the data on memory
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             this->backing_memory_fd.get() < 0,
             "Failed to get backing memory"
         );
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ftruncate(this->backing_memory_fd.get(), rdma_size) == -1,
             "Failed to truncate backing memory to specified size"
         );
 
         spdlog::info("Mapping backing memory...");
         // For the main process, create backing memory
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             madvise(rdma_memory_ptr, rdma_size, MADV_NOHUGEPAGE),
             "Failed to prevent the memory to be backed by huge page"
         );
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             mmap(rdma_memory_ptr, rdma_size, PROT_WRITE | PROT_READ, MAP_FIXED | MAP_SHARED, this->backing_memory_fd.get(), 0) == MAP_FAILED,
             "Failed to map the backing memory"
         );
@@ -148,7 +148,7 @@ class swapper : public PeerNode {
             this->faultfd.write_protect(rdma_memory, rdma_size);
 
             // Remove mapping, for now
-            SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
                 madvise(rdma_memory_ptr, rdma_size, MADV_DONTNEED),
                 "Failed evict all pages during initialization"
             );
@@ -171,11 +171,11 @@ class swapper : public PeerNode {
     bool is_master{};
 
     // Transmission timeout monitor
-    CancelableThread timeout_monitor{std::thread{[this] { this->timeout_monitor_handler(); }}};
+    utils::cancelable_thread timeout_monitor{std::thread{[this] { this->timeout_monitor_handler(); }}};
     TimerFd timeout_timer_fd{};
 
     // The worker thread
-    CancelableThread thread{};
+    utils::cancelable_thread thread{};
     // Backing memory and memory management
     const FileDescriptor backing_memory_fd;
     UserFaultFd faultfd = UserFaultFd();
@@ -221,7 +221,7 @@ class swapper : public PeerNode {
 
     // Utility functions
     inline auto lock(const std::uintptr_t address, const std::size_t size) {
-        SPDLOG_ASSERT_DUMP_IF_ERROR(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
             packet::send(this->master_fd, packet::lock_packet{ .address = address, .size = size }),
             "Failed send locking message for 0x{:x}, size: {}",
             address, size
@@ -240,7 +240,7 @@ class swapper : public PeerNode {
     }
 
     inline auto unlock(const std::uintptr_t address, const std::size_t size) {
-        SPDLOG_ASSERT_DUMP_IF_ERROR(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
             packet::send(this->master_fd, packet::unlock_packet{ .address = address, .size = size }),
             "Failed send unlocking message for 0x{:x}, size: {}",
             address, size
@@ -279,7 +279,7 @@ class swapper : public PeerNode {
 
     auto inline page_out_page(const std::size_t frame_id) {
         spdlog::debug("Page out frame: {}", frame_id);
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             madvise(get_frame_address(frame_id), page_size, MADV_DONTNEED),
             "Cannot discard page mapping"
         );
@@ -321,20 +321,20 @@ class swapper : public PeerNode {
             std::uint8_t compressed[data_max_size];
             {
                 const auto send_size = static_cast<std::size_t>(LZ4_compress_default(reinterpret_cast<char*>(base_address), reinterpret_cast<char*>(compressed), page_size, data_max_size));
-                SPDLOG_ASSERT_DUMP_IF_ERROR(
+                tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                     send_size == 0, "Failed to compress page data"
                 );
 
                 spdlog::trace("Compression {} to {}, {}%", page_size, send_size, static_cast<double>(page_size - send_size) / page_size * 100);
 
-                SPDLOG_ASSERT_DUMP_IF_ERROR(
+                tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                     packet::send(fd, packet::send_page_packet{ .frame_id = frame_id, .size = send_size }, compressed, send_size),
                     "Failed send a page to peer {}:{}, ID {}",
                     addr_str, port, peer_id
                 );
             }
 #else
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 packet::send(fd, packet::send_page_packet{ .frame_id = frame_id, .size = page_size }, base_address, page_size),
                 "Failed send a page to peer {}:{}, ID {}",
                 addr_str, port, peer_id
@@ -359,18 +359,18 @@ class swapper : public PeerNode {
         if(this->out_standing_reads[frame_id].compare_exchange_strong(request_outstanding, false, std::memory_order_seq_cst)) {
             const auto base_address = get_frame_address(frame_id);
 #ifdef COMPRESSION
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 packet::recv(fd, compressed, msg.size),
                 "Failed recv a page, frame = {}",
                 frame_id
             );
 
             const auto recv_size = LZ4_decompress_safe(reinterpret_cast<char*>(compressed), reinterpret_cast<char*>(base_address), msg.size, page_size);
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 recv_size == 0, "Failed to decompress page data"
             );
 #else
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 packet::recv(fd, base_address, msg.size),
                 "Failed recv a page, frame = {}",
                 frame_id
@@ -383,13 +383,13 @@ class swapper : public PeerNode {
         } else {
             spdlog::warn("Frame {} is received twice, discarding", frame_id);
 #ifdef COMPRESSION
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 packet::recv(fd, compressed, msg.size),
                 "Failed recv a page, frame = {}",
                 frame_id
             );
 #else
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 packet::recv(fd, dummy, msg.size),
                 "Failed recv a page, frame = {}",
                 frame_id
@@ -417,7 +417,7 @@ class swapper : public PeerNode {
         if (this->out_standing_writes[frame_id] && peer_id > this->my_id) {
             // Oh oh, we are competing with some other peers
             // We have priority, ignore the request, tell them WE OWN THE PAGE!!
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 packet::send(fd, packet::my_page_packet{ .frame_id = msg.frame_id }),
                 "Failed notify peer {}:{}, ID {}, that we own the page",
                 addr_str, port, peer_id
@@ -428,7 +428,7 @@ class swapper : public PeerNode {
             this->faultfd.write_protect(base_address, page_size);
             this->page_out_page(msg.frame_id);
 
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 packet::send(fd, packet::your_page_packet{ .frame_id = msg.frame_id }),
                 "Failed notify peer {}:{}, ID {}, that he owns the page",
                 addr_str, port, peer_id
@@ -537,7 +537,7 @@ class swapper : public PeerNode {
                     this->ask_page(frame_id);  // Download the data from the owner, can timeout or fail during owner ship transition
                     // continue after we receive a SEND_PAGE packet
                 } else if (current_state == state::SHARED) {
-                    SPDLOG_ASSERT_DUMP_IF_ERROR(!fault.is_write, "A SHARED page trigger a fault, which is not a write");
+                    tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(!fault.is_write, "A SHARED page trigger a fault, which is not a write");
                     // Take ownership
                     this->own_page(frame_id);
 
@@ -546,7 +546,7 @@ class swapper : public PeerNode {
                     }
                     // continue with YOUR_PAGE response handling
                 } else if (current_state == state::OWNED) {
-                    SPDLOG_ASSERT_DUMP_IF_ERROR(true, "A OWNED page trigger a fault");
+                    tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(true, "A OWNED page trigger a fault");
                 }
             }
         }
@@ -604,7 +604,7 @@ class swapper : public PeerNode {
     }
 
     bool handle_no_lock(const FileDescriptor&, const packet::no_lock_packet& msg) final {
-        SPDLOG_ASSERT_DUMP_IF_ERROR(true, "Failed to Lock 0x{:x}, size: {}, not on page or 64 byte boundary?", msg.address, msg.size);
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(true, "Failed to Lock 0x{:x}, size: {}, not on page or 64 byte boundary?", msg.address, msg.size);
         return false;
     }
 
@@ -619,7 +619,7 @@ class swapper : public PeerNode {
     }
 
     bool handle_no_unlock(const FileDescriptor&, const packet::no_unlock_packet& msg) final {
-        SPDLOG_ASSERT_DUMP_IF_ERROR(true, "Failed to Unlock 0x{:x}, size: {}, unlock something that is not locked?", msg.address, msg.size);
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(true, "Failed to Unlock 0x{:x}, size: {}, unlock something that is not locked?", msg.address, msg.size);
         return false;
     }
 };

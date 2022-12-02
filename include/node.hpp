@@ -36,7 +36,7 @@ static inline constexpr auto master_port = 9634;
 class Node {
  public:
     Node(const std::uint16_t port) : listener_fd(socket(AF_INET, SOCK_STREAM, 0)) {
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             listener_fd.get() < 0,
             "Failed to create the listener fd"
         );
@@ -45,11 +45,11 @@ class Node {
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
         addr.sin_addr.s_addr = INADDR_ANY;
-        SPDLOG_ASSERT_DUMP_IF_ERROR(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
             bind(listener_fd.get(), reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)),
             "Failed to bind to port: {}", port
         );
-        SPDLOG_ASSERT_DUMP_IF_ERROR(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
             listen(this->listener_fd.get(), max_concurrent_connection),
             "Failed to listen to socket: {}", listener_fd.get()
         );
@@ -70,11 +70,11 @@ class Node {
 
     // The listener thread
     FileDescriptor listener_fd;
-    CancelableThread listener_thread{};
+    utils::cancelable_thread listener_thread{};
 
     static inline auto addr_to_string(const struct in_addr& addr) {
         auto addr_str = std::string(INET_ADDRSTRLEN, ' ');
-        SPDLOG_ASSERT_DUMP_IF_ERROR(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
             !inet_ntop(AF_INET, &addr, addr_str.data(), INET_ADDRSTRLEN),
             "Failed convert a inet addr to string"
         );
@@ -89,7 +89,7 @@ class Node {
 
     virtual void listener() = 0;
 
-    inline void handler(const std::string& addr_str, const std::uint16_t port, FileDescriptor& fd, CancelableThread& this_thread) {
+    inline void handler(const std::string& addr_str, const std::uint16_t port, FileDescriptor& fd, utils::cancelable_thread& this_thread) {
         const auto epollfd = Epoll(fd, this_thread.evtfd);
         while (!this_thread.stopped.load(std::memory_order_acquire)) {
             // Wait for event
@@ -298,7 +298,7 @@ class MasterNode : public Node {
         struct in_addr addr;
         std::uint16_t port;
         FileDescriptor fd;
-        CancelableThread thread{};
+        utils::cancelable_thread thread{};
         Peer(
             const std::size_t id_,
             const std::string& addr_str_,
@@ -338,7 +338,7 @@ class MasterNode : public Node {
             struct sockaddr_in incomming_peer{};
             socklen_t incomming_peer_size = sizeof(incomming_peer);
             auto client_fd = FileDescriptor{::accept(this->listener_fd.get(), reinterpret_cast<struct sockaddr*>(&incomming_peer), &incomming_peer_size)};
-            SPDLOG_DUMP_IF_ERROR_WITH_ERRNO(client_fd.get() < 0, "Failed to accept a connection") {
+            tDSM_SPDLOG_DUMP_IF_ERROR_WITH_ERRNO(client_fd.get() < 0, "Failed to accept a connection") {
                 continue;
             }
             constexpr auto enabled = 1;
@@ -349,7 +349,7 @@ class MasterNode : public Node {
             spdlog::trace("Accepting new peer : {}, ID: {}", addr_str, peer_id);
 
             // Get port
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 packet::send(client_fd, packet::ask_port_packet{ .peer_id = peer_id }),
                 "Failed send a ask_port packet to peer {}, ID {}",
                 addr_str, peer_id
@@ -410,7 +410,7 @@ class MasterNode : public Node {
         const auto aligned_64_address = msg.address & ~(0x40 - 1);  // round down to 64 bytes boundary
         if (msg.address == reinterpret_cast<std::uintptr_t>(get_frame_address(frame_id)) && msg.size == page_size) {
             this->page_mutex[frame_id].lock();
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 packet::send(fd, msg),
                 "Failed notify peer {}:{}, ID {} that lock is acquired",
                 addr_str, port, peer_id
@@ -424,13 +424,13 @@ class MasterNode : public Node {
 
             spdlog::trace("Locking 0x{:x}, {} bytes for {}:{}, ID: {}", msg.address, msg.size, addr_str, port, peer_id);
 
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 packet::send(fd, msg),
                 "Failed notify peer {}:{}, ID {} that lock is acquired",
                 addr_str, port, peer_id
             );
         } else {
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 packet::send(fd, packet::no_lock_packet{ .address = msg.address, .size = msg.size }),
                 "Failed notify peer {}:{}, ID {} that lock failed",
                 addr_str, port, peer_id
@@ -451,7 +451,7 @@ class MasterNode : public Node {
 
         if (msg.address == reinterpret_cast<std::uintptr_t>(get_frame_address(frame_id)) && msg.size == page_size) {
             this->page_mutex[frame_id].unlock();
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 packet::send(fd, msg),
                 "Failed notify peer {}:{}, ID {} that unlock succeed",
                 addr_str, port, peer_id
@@ -465,13 +465,13 @@ class MasterNode : public Node {
             }
             this->page_mutex[frame_id].unlock_shared();
 
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 packet::send(fd, msg),
                 "Failed notify peer {}:{}, ID {} that unlock succeed",
                 addr_str, port, peer_id
             );
         } else {
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 packet::send(fd, packet::no_unlock_packet{ .address = msg.address, .size = msg.size }),
                 "Failed notify peer {}:{}, ID {} that unlock failed",
                 addr_str, port, peer_id
@@ -548,7 +548,7 @@ class PeerNode : public Node {
             auto inline broadcast(const T& packet) {
                 std::scoped_lock<std::mutex> lk(this->mutex);
                 for (const auto& [fd, peer] : this->peers) {
-                    SPDLOG_ASSERT_DUMP_IF_ERROR(
+                    tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                         packet::send(peer.fd, packet),
                         "Cannot send packet, type = {}, during broadcast", packet.hdr.type);
                 }
@@ -562,10 +562,10 @@ class PeerNode : public Node {
 
     // master <-> client
     FileDescriptor master_fd;
-    CancelableThread master_communication_thread{};
+    utils::cancelable_thread master_communication_thread{};
 
     PeerNode(const std::string master_ip_, const std::uint16_t my_port_) : Node(my_port_), master_ip(master_ip_), my_port(my_port_), master_fd(socket(AF_INET, SOCK_STREAM, 0)) {
-        SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             master_fd.get() < 0,
             "Failed to create the socket for master"
         );
@@ -575,12 +575,12 @@ class PeerNode : public Node {
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(master_port);
-        SPDLOG_ASSERT_DUMP_IF_ERROR(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
             !inet_aton(master_ip.c_str(), &addr.sin_addr),
             "Failed convert {} to a inet address",
             master_ip
         );
-        SPDLOG_ASSERT_DUMP_IF_ERROR(
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
             connect(master_fd.get(), reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)),
             "Failed to connect to master at {}:{}",
             master_ip, master_port
@@ -612,7 +612,7 @@ class PeerNode : public Node {
             struct sockaddr_in incomming_peer{};
             socklen_t incomming_peer_size = sizeof(incomming_peer);
             auto peer_fd = FileDescriptor{::accept(this->listener_fd.get(), reinterpret_cast<struct sockaddr*>(&incomming_peer), &incomming_peer_size)};
-            SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
                 peer_fd.get() < 0,
                 "Failed to accept a connection"
             );
@@ -649,7 +649,7 @@ class PeerNode : public Node {
             peer_addr.sin_port = htons(msg.port);
 
             auto peer_fd = FileDescriptor{socket(AF_INET, SOCK_STREAM, 0)};
-            SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
                 peer_fd.get() < 0,
                 "Failed to create the socket for peer"
             );
@@ -658,7 +658,7 @@ class PeerNode : public Node {
             spdlog::trace("Registering and connecting to a new peer : {}:{}", addr_str, msg.port);
 
             // Connect to the remote peer
-            SPDLOG_ASSERT_DUMP_IF_ERROR(
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 connect(peer_fd.get(), reinterpret_cast<struct sockaddr*>(&peer_addr), sizeof(peer_addr)),
                 "Failed to connect to peer at {}:{}, ID: {}",
                 addr_str, msg.port, msg.peer_id

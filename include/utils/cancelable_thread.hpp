@@ -10,9 +10,11 @@
 
 #include "sys/fd.hpp"
 
-struct CancelableThread {
+namespace tDSM::utils {
+
+struct cancelable_thread {
     template<typename... Ts>
-    CancelableThread(Ts&&... ts) : evtfd(eventfd(0, 0)), thread(std::forward<Ts>(ts)...) {
+    cancelable_thread(Ts&&... ts) : evtfd(eventfd(0, 0)), thread(std::forward<Ts>(ts)...) {
         // Initialize eventfd, this is for unblocking the poll
         if (this->evtfd.get() < 0) {
             spdlog::error("Failed to get eventfd: {}", strerror(errno));
@@ -20,13 +22,13 @@ struct CancelableThread {
         }
     }
 
-    CancelableThread& operator=(std::thread&& ts) {
+    cancelable_thread& operator=(std::thread&& ts) {
         this->stopped.store(false, std::memory_order_seq_cst);
         this->thread = std::forward<std::thread>(ts);
         return *this;
     }
 
-    virtual ~CancelableThread() {
+    virtual ~cancelable_thread() {
         this->cancel_and_join();
     }
 
@@ -64,3 +66,5 @@ struct CancelableThread {
     std::thread thread;
     std::atomic_bool stopped{false};
 };
+
+}  // namespace tDSM::utils
