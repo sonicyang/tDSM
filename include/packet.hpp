@@ -58,6 +58,7 @@ namespace tDSM::packet {
 
     DEFINE_PACKET(ask_port,
         std::uint64_t peer_id = 0x0;
+        std::uint32_t use_compression = 0x0;
     );
 
     DEFINE_PACKET(report_port,

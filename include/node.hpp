@@ -32,6 +32,7 @@
 namespace tDSM {
 
 static inline constexpr auto master_port = 9634;
+extern bool use_compression;
 
 class Node {
  public:
@@ -67,6 +68,8 @@ class Node {
 
  protected:
     static constexpr auto max_concurrent_connection = 16;
+
+    bool use_compression = tDSM::use_compression;
 
     // The listener thread
     sys::file_descriptor listener_fd;
@@ -350,7 +353,7 @@ class master_node : public Node {
 
             // Get port
             tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                packet::send(client_fd, packet::ask_port_packet{ .peer_id = peer_id }),
+                packet::send(client_fd, packet::ask_port_packet{ .peer_id = peer_id, .use_compression = this->use_compression }),
                 "Failed send a ask_port packet to peer {}, ID {}",
                 addr_str, peer_id
             );
@@ -682,6 +685,7 @@ class peer_node : public Node {
 
     bool handle_ask_port(const sys::file_descriptor& fd, const packet::ask_port_packet& msg) final {
         this->my_id = msg.peer_id;
+        this->use_compression = msg.use_compression;
         spdlog::trace("Report my port is {}", this->my_port);
         spdlog::trace("My ID is assigned as {}", this->my_id);
         return packet::send(fd, packet::report_port_packet{ .port = my_port });

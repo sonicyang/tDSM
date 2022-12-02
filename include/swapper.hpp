@@ -35,22 +35,22 @@
 #include "utils/cancelable_thread.hpp"
 #include "utils/logging.hpp"
 
-#define COMPRESSION
-
 namespace tDSM {
 
 // initialized by the ELF constructor
 extern std::string master_ip;
 extern std::uint16_t my_port;
+extern bool is_master;
+extern bool use_compression;
 
 class swapper : public peer_node {
  public:
-    static swapper& get(bool master = false) {
+    static swapper& get() {
         // order matters, master must start before swapper, which is a peer
-        if (master) {
+        if (tDSM::is_master) {
             master_node::get();
         }
-        static swapper instance{master};
+        static swapper instance;
         return instance;
     }
 
@@ -107,7 +107,7 @@ class swapper : public peer_node {
     }
 
  private:
-    swapper(bool is_master_) : peer_node(tDSM::master_ip, tDSM::my_port), is_master(is_master_), backing_memory_fd(memfd_create("test", 0)) {
+    swapper() : peer_node(tDSM::master_ip, tDSM::my_port), is_master(tDSM::is_master), backing_memory_fd(memfd_create("test", 0)) {
         spdlog::info("Initializing RDMA swapper...");
 
         spdlog::info("Creating backing memory...");
@@ -316,30 +316,29 @@ class swapper : public peer_node {
         const auto frame_id = msg.frame_id;
         const auto base_address = get_frame_address(frame_id);
         if (this->states[frame_id].load(std::memory_order_acquire) == state::OWNED) {
-#ifdef COMPRESSION
+            // Default if no compressed
+            const void* ptr_to_send = base_address;
+            std::size_t size_to_send = page_size;
+
             constexpr auto data_max_size = LZ4_COMPRESSBOUND(page_size);
             std::uint8_t compressed[data_max_size];
-            {
-                const auto send_size = static_cast<std::size_t>(LZ4_compress_default(reinterpret_cast<char*>(base_address), reinterpret_cast<char*>(compressed), page_size, data_max_size));
+
+            if (this->use_compression) {
+                ptr_to_send = compressed;
+
+                size_to_send = static_cast<std::size_t>(LZ4_compress_default(reinterpret_cast<char*>(base_address), reinterpret_cast<char*>(compressed), page_size, data_max_size));
                 tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                    send_size == 0, "Failed to compress page data"
+                    size_to_send == 0, "Failed to compress page data"
                 );
 
-                spdlog::trace("Compression {} to {}, {}%", page_size, send_size, static_cast<double>(page_size - send_size) / page_size * 100);
-
-                tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                    packet::send(fd, packet::send_page_packet{ .frame_id = frame_id, .size = send_size }, compressed, send_size),
-                    "Failed send a page to peer {}:{}, ID {}",
-                    addr_str, port, peer_id
-                );
+                spdlog::trace("Compression {} to {}, {}%", page_size, size_to_send, static_cast<double>(page_size - size_to_send) / page_size * 100);
             }
-#else
+
             tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                packet::send(fd, packet::send_page_packet{ .frame_id = frame_id, .size = page_size }, base_address, page_size),
+                packet::send(fd, packet::send_page_packet{ .frame_id = frame_id, .size = size_to_send }, ptr_to_send, size_to_send),
                 "Failed send a page to peer {}:{}, ID {}",
                 addr_str, port, peer_id
             );
-#endif
         }
         return false;
     }
@@ -349,52 +348,44 @@ class swapper : public peer_node {
         const auto frame_id = msg.frame_id;
         bool request_outstanding = true;
 
-#ifdef COMPRESSION
         constexpr auto data_max_size = LZ4_COMPRESSBOUND(page_size);
-        std::uint8_t compressed[data_max_size];
-#else
-        std::uint8_t dummy[page_size];
-#endif
 
         if(this->out_standing_reads[frame_id].compare_exchange_strong(request_outstanding, false, std::memory_order_seq_cst)) {
             const auto base_address = get_frame_address(frame_id);
-#ifdef COMPRESSION
+            void* address_to_write = base_address;
+
+            std::uint8_t compressed[data_max_size];
+
+            if (this->use_compression) {
+                address_to_write = compressed;
+            }
+
             tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                packet::recv(fd, compressed, msg.size),
+                packet::recv(fd, address_to_write, msg.size),
                 "Failed recv a page, frame = {}",
                 frame_id
             );
 
-            const auto recv_size = LZ4_decompress_safe(reinterpret_cast<char*>(compressed), reinterpret_cast<char*>(base_address), msg.size, page_size);
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                recv_size == 0, "Failed to decompress page data"
-            );
-#else
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                packet::recv(fd, base_address, msg.size),
-                "Failed recv a page, frame = {}",
-                frame_id
-            );
-#endif
+            if (this->use_compression) {
+                const auto recv_size = LZ4_decompress_safe(reinterpret_cast<char*>(address_to_write), reinterpret_cast<char*>(base_address), msg.size, page_size);
+                tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
+                    recv_size == 0, "Failed to decompress page data"
+                );
+            }
 
             this->faultfd.write_protect(base_address, page_size);
             this->set_frame_state_shared(frame_id);
             this->faultfd.wake(base_address, page_size);
         } else {
             spdlog::warn("Frame {} is received twice, discarding", frame_id);
-#ifdef COMPRESSION
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                packet::recv(fd, compressed, msg.size),
-                "Failed recv a page, frame = {}",
-                frame_id
-            );
-#else
+
+            std::uint8_t dummy[std::max(page_size, data_max_size)];
+
             tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                 packet::recv(fd, dummy, msg.size),
                 "Failed recv a page, frame = {}",
                 frame_id
             );
-#endif
         }
         return false;
     }

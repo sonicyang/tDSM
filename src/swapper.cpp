@@ -16,6 +16,7 @@ volatile std::uint8_t rdma_memory[rdma_size] __attribute__((section(".rdma"), al
  */
 
 ABSL_FLAG(bool, master, false, "Is master node");
+ABSL_FLAG(bool, compression, false, "Use lz4 compression");
 ABSL_FLAG(std::string, ip, "127.0.0.1", "IP address of master");
 ABSL_FLAG(std::uint16_t, port, 7000, "TCP port for communication");
 
@@ -23,6 +24,8 @@ namespace tDSM {
 
 std::string master_ip{};
 std::uint16_t my_port{};
+bool is_master;
+bool use_compression;
 
 namespace detail {
 static int argc;
@@ -32,10 +35,12 @@ struct StartUpInit {
     StartUpInit() {
         absl::SetProgramUsageMessage(fmt::format("Usage: {} master=<true/false> ip=<IP> port=<Port>\n", argv[0]));
         const auto args = absl::ParseCommandLine(argc, argv);
+        is_master = absl::GetFlag(FLAGS_master);
+        use_compression = absl::GetFlag(FLAGS_compression);
         master_ip = absl::GetFlag(FLAGS_ip);
         my_port = absl::GetFlag(FLAGS_port);
         // First call, initialized!
-        swapper::get(absl::GetFlag(FLAGS_master));
+        swapper::get();
     }
 };
 }  // detail
