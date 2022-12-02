@@ -5,7 +5,7 @@
 #include "swapper.hpp"
 
 int main() {
-    auto& swapper = Swapper::get();
+    auto& swapper = tDSM::swapper::get();
     auto memory = swapper.memory();
 
     //std::uint8_t i = 0;

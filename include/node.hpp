@@ -29,6 +29,8 @@
 #include "packet.hpp"
 #include "cancelable_thread.hpp"
 
+namespace tDSM {
+
 static inline constexpr auto master_port = 9634;
 
 class Node {
@@ -96,7 +98,7 @@ class Node {
                 continue;
             }
 
-            const auto type = Packet::peek_packet_type(fd);
+            const auto type = packet::peek_packet_type(fd);
             if (!type.has_value()) {
                 spdlog::error("Connection to peer {}:{} ended unexpectedly!", addr_str, port);
                 this_thread.stopped.store(true, std::memory_order_relaxed);
@@ -109,7 +111,7 @@ class Node {
         }
         if (fd.get() >= 0) {
             // Tell the remote we are disconnecting
-            Packet::send(fd, Packet::DisconnectPacket{});
+            packet::send(fd, packet::disconnect_packet{});
         }
         spdlog::info("Connection to peer {}:{} ended!", addr_str, port);
         fd.release();
@@ -117,165 +119,158 @@ class Node {
 
     template<typename T>
     inline auto forward_packet(const FileDescriptor& fd, const auto& func) {
-        const auto msg = Packet::recv<T>(fd);
+        const auto msg = packet::recv<T>(fd);
         if (!msg.has_value()) {
             return true;
         }
         return func(this, fd, msg.value());
     }
 
-    inline bool handle_a_packet(const Packet::PacketType& type, const std::string& addr_str, const std::uint16_t port, const FileDescriptor& fd) {
+    inline bool handle_a_packet(const packet::packet_type& type, const std::string& addr_str, const std::uint16_t port, const FileDescriptor& fd) {
         bool err = false;
         bool ret = false;
 
-        spdlog::debug("Handling packet: {} from {}:{}", Packet::packet_type_to_string(type), addr_str, port);
+        spdlog::debug("Handling packet: {} from {}:{}", packet::packet_type_to_string(type), addr_str, port);
 
         switch (type) {
-            case Packet::PacketType::DISCONNECT:
+            case packet::packet_type::disconnect:
                 // No need to recv, socket is close by remote
                 spdlog::info("Peer {}:{} disconnected!", addr_str, port);
                 ret = true;
                 break;
-            case Packet::PacketType::PING:
-                err = forward_packet<Packet::PingPacket>(fd, std::mem_fn(&Node::handle_ping));
+            case packet::packet_type::ping:
+                err = forward_packet<packet::ping_packet>(fd, std::mem_fn(&Node::handle_ping));
                 break;
-            case Packet::PacketType::PONG:
-                err = forward_packet<Packet::PongPacket>(fd, std::mem_fn(&Node::handle_pong));
+            case packet::packet_type::pong:
+                err = forward_packet<packet::pong_packet>(fd, std::mem_fn(&Node::handle_pong));
                 break;
-            case Packet::PacketType::ACK:
-                err = forward_packet<Packet::AckPacket>(fd, std::mem_fn(&Node::handle_ack));
+            case packet::packet_type::ack:
+                err = forward_packet<packet::ack_packet>(fd, std::mem_fn(&Node::handle_ack));
                 break;
-            case Packet::PacketType::ASK_PORT:
-                err = forward_packet<Packet::AskPortPacket>(fd, std::mem_fn(&Node::handle_ask_port));
+            case packet::packet_type::ask_port:
+                err = forward_packet<packet::ask_port_packet>(fd, std::mem_fn(&Node::handle_ask_port));
                 break;
-            case Packet::PacketType::REPORT_PORT:
-                err = forward_packet<Packet::ReportPortPacket>(fd, std::mem_fn(&Node::handle_report_port));
+            case packet::packet_type::report_port:
+                err = forward_packet<packet::report_port_packet>(fd, std::mem_fn(&Node::handle_report_port));
                 break;
-            case Packet::PacketType::REGISTER_PEER:
-                err = forward_packet<Packet::RegisterPeerPacket>(fd, std::mem_fn(&Node::handle_register_peer));
+            case packet::packet_type::register_peer:
+                err = forward_packet<packet::register_peer_packet>(fd, std::mem_fn(&Node::handle_register_peer));
                 break;
-            case Packet::PacketType::UNREGISTER_PEER:
-                err = forward_packet<Packet::UnregisterPeerPacket>(fd, std::mem_fn(&Node::handle_unregister_peer));
+            case packet::packet_type::unregister_peer:
+                err = forward_packet<packet::unregister_peer_packet>(fd, std::mem_fn(&Node::handle_unregister_peer));
                 break;
-            case Packet::PacketType::MYID:
-                err = forward_packet<Packet::MyIDPacket>(fd, std::mem_fn(&Node::handle_my_id));
+            case packet::packet_type::my_id:
+                err = forward_packet<packet::my_id_packet>(fd, std::mem_fn(&Node::handle_my_id));
                 break;
-            case Packet::PacketType::ASK_PAGE:
-                err = forward_packet<Packet::AskPagePacket>(fd, std::mem_fn(&Node::handle_ask_page));
+            case packet::packet_type::ask_page:
+                err = forward_packet<packet::ask_page_packet>(fd, std::mem_fn(&Node::handle_ask_page));
                 break;
-            case Packet::PacketType::SEND_PAGE:
-                err = forward_packet<Packet::SendPagePacketHdr>(fd, std::mem_fn(&Node::handle_send_page));
+            case packet::packet_type::send_page:
+                err = forward_packet<packet::send_page_packet>(fd, std::mem_fn(&Node::handle_send_page));
                 break;
-            case Packet::PacketType::MY_PAGE:
-                err = forward_packet<Packet::MyPagePacket>(fd, std::mem_fn(&Node::handle_my_page));
+            case packet::packet_type::my_page:
+                err = forward_packet<packet::my_page_packet>(fd, std::mem_fn(&Node::handle_my_page));
                 break;
-            case Packet::PacketType::YOUR_PAGE:
-                err = forward_packet<Packet::YourPagePacket>(fd, std::mem_fn(&Node::handle_your_page));
+            case packet::packet_type::your_page:
+                err = forward_packet<packet::your_page_packet>(fd, std::mem_fn(&Node::handle_your_page));
                 break;
-            case Packet::PacketType::LOCK:
-                err = forward_packet<Packet::LockPacket>(fd, std::mem_fn(&Node::handle_lock));
+            case packet::packet_type::lock:
+                err = forward_packet<packet::lock_packet>(fd, std::mem_fn(&Node::handle_lock));
                 break;
-            case Packet::PacketType::NO_LOCK:
-                err = forward_packet<Packet::NoLockPacket>(fd, std::mem_fn(&Node::handle_no_lock));
+            case packet::packet_type::no_lock:
+                err = forward_packet<packet::no_lock_packet>(fd, std::mem_fn(&Node::handle_no_lock));
                 break;
-            case Packet::PacketType::UNLOCK:
-                err = forward_packet<Packet::UnlockPacket>(fd, std::mem_fn(&Node::handle_unlock));
+            case packet::packet_type::unlock:
+                err = forward_packet<packet::unlock_packet>(fd, std::mem_fn(&Node::handle_unlock));
                 break;
-            case Packet::PacketType::NO_UNLOCK:
-                err = forward_packet<Packet::NoUnlockPacket>(fd, std::mem_fn(&Node::handle_no_unlock));
-                break;
-            case Packet::PacketType::NUM_PACKET_TYPE:
-                spdlog::warn("Unknown or unhandled packet type {}", Packet::packet_type_to_string(type));
+            case packet::packet_type::no_unlock:
+                err = forward_packet<packet::no_unlock_packet>(fd, std::mem_fn(&Node::handle_no_unlock));
                 break;
         }
 
         if (err) {
-            spdlog::error("Reading packet type {} from peer {} cause an error!", Packet::packet_type_to_string(type), addr_str);
+            spdlog::error("Reading packet type {} from peer {} cause an error!", packet::packet_type_to_string(type), addr_str);
         }
         return ret;
     }
 
-    bool handle_ping(const FileDescriptor& fd, const Packet::PingPacket& msg) {
-        spdlog::trace("Ping!");
-        return Packet::send(fd, Packet::PongPacket{ .magic = msg.magic });
+    bool handle_ping(const FileDescriptor& fd, const packet::ping_packet& msg) {
+        spdlog::trace("ping!");
+        return packet::send(fd, packet::pong_packet{ .magic = msg.magic });
     }
 
-    bool handle_pong(const FileDescriptor&, const Packet::PongPacket&) {
-        spdlog::trace("Pong!");
+    bool handle_pong(const FileDescriptor&, const packet::pong_packet&) {
+        spdlog::trace("pong!");
         return false;
     }
 
-    bool handle_ack(const FileDescriptor&, const Packet::AckPacket&) {
-        spdlog::trace("Got ACK!");
+    bool handle_ack(const FileDescriptor&, const packet::ack_packet&) {
+        spdlog::trace("Got ack!");
         return false;
     }
 
-    virtual bool handle_ask_port(const FileDescriptor&, const Packet::AskPortPacket&) {
-        spdlog::warn("Ignoring a ASK_PORT packet");
+    virtual bool handle_ask_port(const FileDescriptor&, const packet::ask_port_packet&) {
+        spdlog::warn("Ignoring a ask_port packet");
         return false;
     }
 
-    virtual bool handle_report_port(const FileDescriptor&, const Packet::ReportPortPacket&) {
-        spdlog::warn("Ignoring a REPORT_PORT packet");
+    virtual bool handle_report_port(const FileDescriptor&, const packet::report_port_packet&) {
+        spdlog::warn("Ignoring a report_port packet");
         return false;
     }
 
-    virtual bool handle_register_peer(const FileDescriptor&, const Packet::RegisterPeerPacket&) {
-        spdlog::warn("Ignoring a REGISTER_PEER packet");
+    virtual bool handle_register_peer(const FileDescriptor&, const packet::register_peer_packet&) {
+        spdlog::warn("Ignoring a register_peer packet");
         return false;
     }
 
-    virtual bool handle_unregister_peer(const FileDescriptor&, const Packet::UnregisterPeerPacket&) {
-        spdlog::warn("Ignoring a UNREGISTER_PEER packet");
+    virtual bool handle_unregister_peer(const FileDescriptor&, const packet::unregister_peer_packet&) {
+        spdlog::warn("Ignoring a unregister_peer packet");
         return false;
     }
 
-    virtual bool handle_my_id(const FileDescriptor&, const Packet::MyIDPacket&) {
-        spdlog::warn("Ignoring a MY_ID packet");
+    virtual bool handle_my_id(const FileDescriptor&, const packet::my_id_packet&) {
+        spdlog::warn("Ignoring a my_id packet");
         return false;
     }
 
-    virtual bool handle_ask_page(const FileDescriptor&, const Packet::AskPagePacket&) {
-        spdlog::warn("Ignoring a ASK_PAGE packet");
+    virtual bool handle_ask_page(const FileDescriptor&, const packet::ask_page_packet&) {
+        spdlog::warn("Ignoring a ask_page packet");
         return false;
     }
 
-    virtual bool handle_send_page(const FileDescriptor& fd, const Packet::SendPagePacketHdr&) {
-        /* discard a page */
-        std::uint8_t dummy[page_size];
-        (void)Packet::recv(fd, dummy, page_size);
-        (void)dummy;
-        spdlog::warn("Ignoring a SEND_PAGE packet");
+    virtual bool handle_send_page(const FileDescriptor&, const packet::send_page_packet&) {
+        spdlog::warn("Ignoring a send_page packet");
         return false;
     }
 
-    virtual bool handle_my_page(const FileDescriptor&, const Packet::MyPagePacket&) {
-        spdlog::warn("Ignoring a MY_PAGE packet");
+    virtual bool handle_my_page(const FileDescriptor&, const packet::my_page_packet&) {
+        spdlog::warn("Ignoring a my_page packet");
         return false;
     }
 
-    virtual bool handle_your_page(const FileDescriptor&, const Packet::YourPagePacket&) {
-        spdlog::warn("Ignoring a YOUR_PAGE packet");
+    virtual bool handle_your_page(const FileDescriptor&, const packet::your_page_packet&) {
+        spdlog::warn("Ignoring a your_page packet");
         return false;
     }
 
-    virtual bool handle_lock(const FileDescriptor&, const Packet::LockPacket&) {
-        spdlog::warn("Ignoring a LOCK packet");
+    virtual bool handle_lock(const FileDescriptor&, const packet::lock_packet&) {
+        spdlog::warn("Ignoring a lock packet");
         return false;
     }
 
-    virtual bool handle_no_lock(const FileDescriptor&, const Packet::NoLockPacket&) {
-        spdlog::warn("Ignoring a NO_LOCK packet");
+    virtual bool handle_no_lock(const FileDescriptor&, const packet::no_lock_packet&) {
+        spdlog::warn("Ignoring a no_lock packet");
         return false;
     }
 
-    virtual bool handle_unlock(const FileDescriptor&, const Packet::UnlockPacket&) {
-        spdlog::warn("Ignoring a UNLOCK packet");
+    virtual bool handle_unlock(const FileDescriptor&, const packet::unlock_packet&) {
+        spdlog::warn("Ignoring a unlock packet");
         return false;
     }
 
-    virtual bool handle_no_unlock(const FileDescriptor&, const Packet::NoUnlockPacket&) {
-        spdlog::warn("Ignoring a NO_UNLOCK packet");
+    virtual bool handle_no_unlock(const FileDescriptor&, const packet::no_unlock_packet&) {
+        spdlog::warn("Ignoring a no_unlock packet");
         return false;
     }
 };
@@ -355,15 +350,15 @@ class MasterNode : public Node {
 
             // Get port
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::send(client_fd, Packet::AskPortPacket{ .peer_id = peer_id }),
-                "Failed send a AskPort packet to peer {}, ID {}",
+                packet::send(client_fd, packet::ask_port_packet{ .peer_id = peer_id }),
+                "Failed send a ask_port packet to peer {}, ID {}",
                 addr_str, peer_id
             );
-            const auto response = Packet::recv<Packet::ReportPortPacket>(client_fd);
+            const auto response = packet::recv<packet::report_port_packet>(client_fd);
 
             if (!response.has_value()) {
                 spdlog::error("Failed to acquire the port of : {}", addr_str);
-                (void)Packet::send(client_fd, Packet::DisconnectPacket{});
+                (void)packet::send(client_fd, packet::disconnect_packet{});
                 continue;
             }
 
@@ -373,7 +368,7 @@ class MasterNode : public Node {
                 std::scoped_lock<std::mutex> lk{this->peers_mutex};
                 for (const auto& [id, other_peer] : this->peers) {
                     if (!other_peer->thread.stopped.load(std::memory_order_acquire)) {
-                        if(Packet::send(other_peer->fd, Packet::RegisterPeerPacket{
+                        if(packet::send(other_peer->fd, packet::register_peer_packet{
                             .peer_id = peer_id,
                             .addr = incomming_peer.sin_addr.s_addr,
                             .port = response.value().port,
@@ -405,7 +400,7 @@ class MasterNode : public Node {
     mutable std::mutex state_mutex[n_pages]{};
     std::unordered_map<std::uintptr_t, std::mutex> line_mutex[n_pages];
 
-    bool handle_lock(const FileDescriptor& fd, const Packet::LockPacket& msg) final {
+    bool handle_lock(const FileDescriptor& fd, const packet::lock_packet& msg) final {
         auto& peer           = this->peers[fd.get()];
         const auto peer_id   = peer->id;
         const auto& addr_str = peer->addr_str;
@@ -416,7 +411,7 @@ class MasterNode : public Node {
         if (msg.address == reinterpret_cast<std::uintptr_t>(get_frame_address(frame_id)) && msg.size == page_size) {
             this->page_mutex[frame_id].lock();
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::send(fd, msg),
+                packet::send(fd, msg),
                 "Failed notify peer {}:{}, ID {} that lock is acquired",
                 addr_str, port, peer_id
             );
@@ -430,13 +425,13 @@ class MasterNode : public Node {
             spdlog::trace("Locking 0x{:x}, {} bytes for {}:{}, ID: {}", msg.address, msg.size, addr_str, port, peer_id);
 
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::send(fd, msg),
+                packet::send(fd, msg),
                 "Failed notify peer {}:{}, ID {} that lock is acquired",
                 addr_str, port, peer_id
             );
         } else {
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::send(fd, Packet::NoLockPacket{ .address = msg.address, .size = msg.size }),
+                packet::send(fd, packet::no_lock_packet{ .address = msg.address, .size = msg.size }),
                 "Failed notify peer {}:{}, ID {} that lock failed",
                 addr_str, port, peer_id
             );
@@ -445,7 +440,7 @@ class MasterNode : public Node {
         return false;
     }
 
-    bool handle_unlock(const FileDescriptor& fd, const Packet::UnlockPacket& msg) final {
+    bool handle_unlock(const FileDescriptor& fd, const packet::unlock_packet& msg) final {
         auto& peer           = this->peers[fd.get()];
         const auto peer_id   = peer->id;
         const auto& addr_str = peer->addr_str;
@@ -457,7 +452,7 @@ class MasterNode : public Node {
         if (msg.address == reinterpret_cast<std::uintptr_t>(get_frame_address(frame_id)) && msg.size == page_size) {
             this->page_mutex[frame_id].unlock();
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::send(fd, msg),
+                packet::send(fd, msg),
                 "Failed notify peer {}:{}, ID {} that unlock succeed",
                 addr_str, port, peer_id
             );
@@ -471,13 +466,13 @@ class MasterNode : public Node {
             this->page_mutex[frame_id].unlock_shared();
 
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::send(fd, msg),
+                packet::send(fd, msg),
                 "Failed notify peer {}:{}, ID {} that unlock succeed",
                 addr_str, port, peer_id
             );
         } else {
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::send(fd, Packet::NoUnlockPacket{ .address = msg.address, .size = msg.size }),
+                packet::send(fd, packet::no_unlock_packet{ .address = msg.address, .size = msg.size }),
                 "Failed notify peer {}:{}, ID {} that unlock failed",
                 addr_str, port, peer_id
             );
@@ -502,7 +497,7 @@ class PeerNode : public Node {
             auto inline del(FileDescriptor& fd) {
                 std::scoped_lock<std::mutex> lk{this->mutex};
                 if (fd.get() >= 0) {
-                    Packet::send(fd, Packet::DisconnectPacket{});
+                    packet::send(fd, packet::disconnect_packet{});
                 }
                 this->epollfd.delete_fd(fd);
                 this->peers.erase(fd.get());
@@ -513,7 +508,7 @@ class PeerNode : public Node {
                 std::scoped_lock<std::mutex> lk{this->mutex};
                 for (auto& [fd, peer] : this->peers) {
                     if (peer.fd.get() >= 0) {
-                        Packet::send(peer.fd, Packet::DisconnectPacket{});
+                        packet::send(peer.fd, packet::disconnect_packet{});
                     }
                     this->epollfd.delete_fd(peer.fd);
                 }
@@ -554,7 +549,7 @@ class PeerNode : public Node {
                 std::scoped_lock<std::mutex> lk(this->mutex);
                 for (const auto& [fd, peer] : this->peers) {
                     SPDLOG_ASSERT_DUMP_IF_ERROR(
-                        Packet::send(peer.fd, packet),
+                        packet::send(peer.fd, packet),
                         "Cannot send packet, type = {}, during broadcast", packet.hdr.type);
                 }
             }
@@ -631,7 +626,7 @@ class PeerNode : public Node {
             spdlog::trace("Swapper accepting new peer : {}", addr_str);
 
             // What is their ID?
-            const auto response = Packet::recv<Packet::MyIDPacket>(peer_fd);
+            const auto response = packet::recv<packet::my_id_packet>(peer_fd);
             if (!response.has_value()) {
                 spdlog::error("Fail to receive peer ID : {}", addr_str);
                 continue;
@@ -646,7 +641,7 @@ class PeerNode : public Node {
         }
     }
 
-    bool handle_register_peer(const FileDescriptor& fd, const Packet::RegisterPeerPacket& msg) final {
+    bool handle_register_peer(const FileDescriptor& fd, const packet::register_peer_packet& msg) final {
         if (msg.peer_id > my_id) {  // New peer connected into the federation, connect and make p2p channel
             struct sockaddr_in peer_addr{};
             peer_addr.sin_family = AF_INET;
@@ -670,7 +665,7 @@ class PeerNode : public Node {
             );
 
             // Tell them our ID
-            if (Packet::send(peer_fd, Packet::MyIDPacket{ .peer_id = my_id })) {
+            if (packet::send(peer_fd, packet::my_id_packet{ .peer_id = my_id })) {
                 spdlog::error("Fail to transmit peer ID : {}", addr_str);
                 return true;
             }
@@ -682,13 +677,15 @@ class PeerNode : public Node {
 
             spdlog::info("Register a peer {}:{}, ID: {}", addr_str, msg.port, msg.peer_id);
         }
-        return Packet::send(fd, Packet::AckPacket{});
+        return packet::send(fd, packet::ack_packet{});
     }
 
-    bool handle_ask_port(const FileDescriptor& fd, const Packet::AskPortPacket& msg) final {
+    bool handle_ask_port(const FileDescriptor& fd, const packet::ask_port_packet& msg) final {
         this->my_id = msg.peer_id;
         spdlog::trace("Report my port is {}", this->my_port);
         spdlog::trace("My ID is assigned as {}", this->my_id);
-        return Packet::send(fd, Packet::ReportPortPacket{ .port = my_port });
+        return packet::send(fd, packet::report_port_packet{ .port = my_port });
     }
 };
+
+}  // namespace tDSM

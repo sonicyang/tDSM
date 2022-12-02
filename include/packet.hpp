@@ -7,152 +7,114 @@
 #include <optional>
 #include <spdlog/spdlog.h>
 
+#include "compiler.hpp"
+#include "better_enum.hpp"
 #include "configs.hpp"
 #include "logging.hpp"
 #include "fd.hpp"
 
-namespace Packet {
-    enum PacketType : uint32_t {
-        PING,
-        PONG,
-        ASK_PORT,
-        REPORT_PORT,
-        DISCONNECT,
-        ACK,
-        REGISTER_PEER,
-        UNREGISTER_PEER,
-        MYID,
-        ASK_PAGE,
-        SEND_PAGE,
-        MY_PAGE,
-        YOUR_PAGE,
-        LOCK,
-        NO_LOCK,
-        UNLOCK,
-        NO_UNLOCK,
-        NUM_PACKET_TYPE
-    };
+#define DEFINE_PACKET(name, ...) \
+    struct name##_packet { \
+        packet_header hdr = { .type = packet_type::name }; \
+        __VA_ARGS__ \
+    } tDSM_PACKED_STRUCT
 
-    static auto inline packet_type_to_string(const PacketType type) {
-#define CASE(name) case name: return #name
-        switch(type) {
-            CASE(PING);
-            CASE(PONG);
-            CASE(ASK_PORT);
-            CASE(REPORT_PORT);
-            CASE(DISCONNECT);
-            CASE(ACK);
-            CASE(REGISTER_PEER);
-            CASE(UNREGISTER_PEER);
-            CASE(MYID);
-            CASE(ASK_PAGE);
-            CASE(SEND_PAGE);
-            CASE(MY_PAGE);
-            CASE(YOUR_PAGE);
-            CASE(LOCK);
-            CASE(NO_LOCK);
-            CASE(UNLOCK);
-            CASE(NO_UNLOCK);
-            CASE(NUM_PACKET_TYPE);
-        }
-        return "";
-#undef CASE
-    }
+namespace tDSM::packet {
+    tDSM_BETTER_ENUM(packet_type, std::uint32_t,
+        ping,
+        pong,
+        ask_port,
+        report_port,
+        disconnect,
+        ack,
+        register_peer,
+        unregister_peer,
+        my_id,
+        ask_page,
+        send_page,
+        my_page,
+        your_page,
+        lock,
+        no_lock,
+        unlock,
+        no_unlock
+    );
 
-    struct PacketHeader {
-        PacketType type;
-    } __attribute((packed));
+    struct packet_header {
+        packet_type type;
+    } tDSM_PACKED_STRUCT;
 
-    struct PingPacket {
-        PacketHeader hdr = { .type = PacketType::PING };
-        uint32_t magic = 0;
-    } __attribute((packed));
+    DEFINE_PACKET(ping,
+        std::uint32_t magic = 0;
+    );
 
-    struct PongPacket {
-        PacketHeader hdr = { .type = PacketType::PONG };
-        uint32_t magic = 0;
-    } __attribute((packed));
+    DEFINE_PACKET(pong,
+        std::uint32_t magic = 0;
+    );
 
-    struct DisconnectPacket {
-        PacketHeader hdr = { .type = PacketType::DISCONNECT };
-    } __attribute((packed));
+    DEFINE_PACKET(disconnect);
 
-    struct AckPacket {
-        PacketHeader hdr = { .type = PacketType::ACK };
-    } __attribute((packed));
+    DEFINE_PACKET(ack);
 
-    struct AskPortPacket {
-        PacketHeader hdr = { .type = PacketType::ASK_PORT };
+    DEFINE_PACKET(ask_port,
         std::uint64_t peer_id = 0x0;
-    } __attribute((packed));
+    );
 
-    struct ReportPortPacket {
-        PacketHeader hdr = { .type = PacketType::REPORT_PORT };
+    DEFINE_PACKET(report_port,
         std::uint16_t port = 0;
-    } __attribute((packed));
+    );
 
-    struct RegisterPeerPacket {
-        PacketHeader hdr = { .type = PacketType::REGISTER_PEER };
+    DEFINE_PACKET(register_peer,
         std::uint64_t peer_id = 0x0;
         std::uint32_t addr = 0;
         std::uint16_t port = 0;
-    } __attribute((packed));
+    );
 
-    struct UnregisterPeerPacket {
-        PacketHeader hdr = { .type = PacketType::UNREGISTER_PEER };
+    DEFINE_PACKET(unregister_peer,
         std::uint32_t addr = 0;
         std::uint16_t port = 0;
-    } __attribute((packed));
+    );
 
-    struct MyIDPacket {
-        PacketHeader hdr = { .type = PacketType::MYID };
+    DEFINE_PACKET(my_id,
         std::uint64_t peer_id = 0x0;
-    } __attribute((packed));
+    );
 
-    struct AskPagePacket {
-        PacketHeader hdr = { .type = PacketType::ASK_PAGE };
+    DEFINE_PACKET(ask_page,
         std::size_t frame_id = 0x0;
-    } __attribute((packed));
+    );
 
-    struct SendPagePacketHdr {
-        PacketHeader hdr = { .type = PacketType::SEND_PAGE };
+    DEFINE_PACKET(send_page,
         std::size_t frame_id = 0x0;
         std::size_t size = page_size;
-    } __attribute((packed));
+    );
 
-    struct MyPagePacket {
-        PacketHeader hdr = { .type = PacketType::MY_PAGE };
+    DEFINE_PACKET(my_page,
         std::size_t frame_id = 0x0;
-    } __attribute((packed));
+    );
 
-    struct YourPagePacket {
-        PacketHeader hdr = { .type = PacketType::YOUR_PAGE };
+    DEFINE_PACKET(your_page,
         std::size_t frame_id = 0x0;
-    } __attribute((packed));
+    );
 
-    struct LockPacket {
-        PacketHeader hdr = { .type = PacketType::LOCK };
+    DEFINE_PACKET(lock,
         std::uintptr_t address = 0x0;
         std::size_t size = 0x0;
-    } __attribute((packed));
+    );
 
-    struct NoLockPacket {
-        PacketHeader hdr = { .type = PacketType::NO_LOCK };
+    DEFINE_PACKET(no_lock,
         std::uintptr_t address = 0x0;
         std::size_t size = 0x0;
-    } __attribute((packed));
+    );
 
-    struct UnlockPacket {
-        PacketHeader hdr = { .type = PacketType::UNLOCK };
+    DEFINE_PACKET(unlock,
         std::uintptr_t address = 0x0;
         std::size_t size = 0x0;
-    } __attribute((packed));
+    );
 
-    struct NoUnlockPacket {
-        PacketHeader hdr = { .type = PacketType::NO_UNLOCK };
+    DEFINE_PACKET(no_unlock,
         std::uintptr_t address = 0x0;
         std::size_t size = 0x0;
-    } __attribute((packed));
+    );
 
     // XXX: Add traits as protection
     template<typename T>
@@ -177,12 +139,12 @@ namespace Packet {
         return false;
     }
 
-    static inline std::optional<PacketType> peek_packet_type(const FileDescriptor& fd) {
-        PacketHeader hdr;
-        if (recv(fd.get(), &hdr, sizeof(hdr), MSG_PEEK) != sizeof(hdr)) {
+    static inline std::optional<packet_type> peek_packet_type(const FileDescriptor& fd) {
+        packet_header hdr;
+        if (::recv(fd.get(), &hdr, sizeof(hdr), MSG_PEEK) != sizeof(hdr)) {
             return {};
         }
-        return static_cast<PacketType>(hdr.type);
+        return static_cast<packet_type>(hdr.type);
     }
 
     static inline bool recv(const FileDescriptor& fd, void* const data, const std::size_t length) {
@@ -210,4 +172,6 @@ namespace Packet {
 
         return packet;
     }
-}  // Packet
+}  // tDSM::packet
+
+#undef DEFINE_PACKET

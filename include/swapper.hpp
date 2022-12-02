@@ -37,18 +37,20 @@
 
 #define COMPRESSION
 
+namespace tDSM {
+
 // initialized by the ELF constructor
 extern std::string master_ip;
 extern std::uint16_t my_port;
 
-class Swapper : public PeerNode {
+class swapper : public PeerNode {
  public:
-    static Swapper& get(bool master = false) {
+    static swapper& get(bool master = false) {
         // order matters, master must start before swapper, which is a peer
         if (master) {
             MasterNode::get();
         }
-        static Swapper instance{master};
+        static swapper instance{master};
         return instance;
     }
 
@@ -105,8 +107,8 @@ class Swapper : public PeerNode {
     }
 
  private:
-    Swapper(bool is_master_) : PeerNode(::master_ip, ::my_port), is_master(is_master_), backing_memory_fd(memfd_create("test", 0)) {
-        spdlog::info("Initializing RDMA Swapper...");
+    swapper(bool is_master_) : PeerNode(tDSM::master_ip, tDSM::my_port), is_master(is_master_), backing_memory_fd(memfd_create("test", 0)) {
+        spdlog::info("Initializing RDMA swapper...");
 
         spdlog::info("Creating backing memory...");
 
@@ -158,13 +160,13 @@ class Swapper : public PeerNode {
         });
     }
 
-    ~Swapper() override {}
+    ~swapper() override {}
 
     // Singlton
-    Swapper(const Swapper&) = delete;
-    Swapper& operator=(const Swapper&) = delete;
-    Swapper(Swapper&&) = delete;
-    Swapper& operator=(Swapper&&) = delete;
+    swapper(const swapper&) = delete;
+    swapper& operator=(const swapper&) = delete;
+    swapper(swapper&&) = delete;
+    swapper& operator=(swapper&&) = delete;
 
     bool is_master{};
 
@@ -220,7 +222,7 @@ class Swapper : public PeerNode {
     // Utility functions
     inline auto lock(const std::uintptr_t address, const std::size_t size) {
         SPDLOG_ASSERT_DUMP_IF_ERROR(
-            Packet::send(this->master_fd, Packet::LockPacket{ .address = address, .size = size }),
+            packet::send(this->master_fd, packet::lock_packet{ .address = address, .size = size }),
             "Failed send locking message for 0x{:x}, size: {}",
             address, size
         );
@@ -239,7 +241,7 @@ class Swapper : public PeerNode {
 
     inline auto unlock(const std::uintptr_t address, const std::size_t size) {
         SPDLOG_ASSERT_DUMP_IF_ERROR(
-            Packet::send(this->master_fd, Packet::UnlockPacket{ .address = address, .size = size }),
+            packet::send(this->master_fd, packet::unlock_packet{ .address = address, .size = size }),
             "Failed send unlocking message for 0x{:x}, size: {}",
             address, size
         );
@@ -258,7 +260,7 @@ class Swapper : public PeerNode {
         spdlog::trace("Asking frame {}", frame_id);
         bool request_outstanding = false;
         if(this->out_standing_reads[frame_id].compare_exchange_strong(request_outstanding, true, std::memory_order_seq_cst)) {
-            this->peers.broadcast(Packet::AskPagePacket{ .frame_id = frame_id });
+            this->peers.broadcast(packet::ask_page_packet{ .frame_id = frame_id });
         }
     }
 
@@ -267,7 +269,7 @@ class Swapper : public PeerNode {
         std::scoped_lock<std::mutex> lk{this->fencing_mutex[frame_id]};
         this->fencing_set[frame_id].clear();
         this->out_standing_writes[frame_id] = true;
-        this->peers.broadcast(Packet::MyPagePacket{ .frame_id = frame_id });
+        this->peers.broadcast(packet::my_page_packet{ .frame_id = frame_id });
     }
 
     auto inline wait_for_write(const pid_t tid) {
@@ -301,7 +303,7 @@ class Swapper : public PeerNode {
         states[frame_id].store(state::OWNED, order);
     }
 
-    bool handle_ask_page(const FileDescriptor& fd, const Packet::AskPagePacket& msg) final {
+    bool handle_ask_page(const FileDescriptor& fd, const packet::ask_page_packet& msg) final {
         // Someone is asking for a page
         auto peer = this->peers[fd.get()];
         if (!peer.has_value()) {  // Already closed?
@@ -326,14 +328,14 @@ class Swapper : public PeerNode {
                 spdlog::trace("Compression {} to {}, {}%", page_size, send_size, static_cast<double>(page_size - send_size) / page_size * 100);
 
                 SPDLOG_ASSERT_DUMP_IF_ERROR(
-                    Packet::send(fd, Packet::SendPagePacketHdr{ .frame_id = frame_id, .size = send_size }, compressed, send_size),
+                    packet::send(fd, packet::send_page_packet{ .frame_id = frame_id, .size = send_size }, compressed, send_size),
                     "Failed send a page to peer {}:{}, ID {}",
                     addr_str, port, peer_id
                 );
             }
 #else
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::send(fd, Packet::SendPagePacketHdr{ .frame_id = frame_id, .size = page_size }, base_address, page_size),
+                packet::send(fd, packet::send_page_packet{ .frame_id = frame_id, .size = page_size }, base_address, page_size),
                 "Failed send a page to peer {}:{}, ID {}",
                 addr_str, port, peer_id
             );
@@ -342,7 +344,7 @@ class Swapper : public PeerNode {
         return false;
     }
 
-    bool handle_send_page(const FileDescriptor& fd, const Packet::SendPagePacketHdr& msg) final {
+    bool handle_send_page(const FileDescriptor& fd, const packet::send_page_packet& msg) final {
         // Someone is sending a data of a page to me
         const auto frame_id = msg.frame_id;
         bool request_outstanding = true;
@@ -358,7 +360,7 @@ class Swapper : public PeerNode {
             const auto base_address = get_frame_address(frame_id);
 #ifdef COMPRESSION
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::recv(fd, compressed, msg.size),
+                packet::recv(fd, compressed, msg.size),
                 "Failed recv a page, frame = {}",
                 frame_id
             );
@@ -369,7 +371,7 @@ class Swapper : public PeerNode {
             );
 #else
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::recv(fd, base_address, msg.size),
+                packet::recv(fd, base_address, msg.size),
                 "Failed recv a page, frame = {}",
                 frame_id
             );
@@ -382,13 +384,13 @@ class Swapper : public PeerNode {
             spdlog::warn("Frame {} is received twice, discarding", frame_id);
 #ifdef COMPRESSION
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::recv(fd, compressed, msg.size),
+                packet::recv(fd, compressed, msg.size),
                 "Failed recv a page, frame = {}",
                 frame_id
             );
 #else
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::recv(fd, dummy, msg.size),
+                packet::recv(fd, dummy, msg.size),
                 "Failed recv a page, frame = {}",
                 frame_id
             );
@@ -397,7 +399,7 @@ class Swapper : public PeerNode {
         return false;
     }
 
-    bool handle_my_page(const FileDescriptor& fd, const Packet::MyPagePacket& msg) final {
+    bool handle_my_page(const FileDescriptor& fd, const packet::my_page_packet& msg) final {
         // Someone is taking the ownership of a page
         const auto frame_id = msg.frame_id;
         const auto base_address = get_frame_address(msg.frame_id);
@@ -416,7 +418,7 @@ class Swapper : public PeerNode {
             // Oh oh, we are competing with some other peers
             // We have priority, ignore the request, tell them WE OWN THE PAGE!!
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::send(fd, Packet::MyPagePacket{ .frame_id = msg.frame_id }),
+                packet::send(fd, packet::my_page_packet{ .frame_id = msg.frame_id }),
                 "Failed notify peer {}:{}, ID {}, that we own the page",
                 addr_str, port, peer_id
             );
@@ -427,7 +429,7 @@ class Swapper : public PeerNode {
             this->page_out_page(msg.frame_id);
 
             SPDLOG_ASSERT_DUMP_IF_ERROR(
-                Packet::send(fd, Packet::YourPagePacket{ .frame_id = msg.frame_id }),
+                packet::send(fd, packet::your_page_packet{ .frame_id = msg.frame_id }),
                 "Failed notify peer {}:{}, ID {}, that he owns the page",
                 addr_str, port, peer_id
             );
@@ -444,7 +446,7 @@ class Swapper : public PeerNode {
         return false;
     }
 
-    bool handle_your_page(const FileDescriptor& fd, const Packet::YourPagePacket& msg) final {
+    bool handle_your_page(const FileDescriptor& fd, const packet::your_page_packet& msg) final {
         // Someone is responding the request we want to take ownership of the page
         auto peer = this->peers[fd.get()];
         if (!peer.has_value()) {  // Already closed?
@@ -492,28 +494,28 @@ class Swapper : public PeerNode {
                     const auto& addr_str = peer.value()->addr_str;
                     const auto port      = peer.value()->port;
 
-                    const auto type = Packet::peek_packet_type(fd);
+                    const auto type = packet::peek_packet_type(fd);
                     if (!type.has_value()) {
-                        spdlog::error("Swapper connection to peer {}:{}, ID: {} ended unexpectedly!", addr_str, port, peer_id);
+                        spdlog::error("swapper connection to peer {}:{}, ID: {} ended unexpectedly!", addr_str, port, peer_id);
                         this->peers.del(fd);
                         continue;
                     }
 
                     // Default actions
                     if (this->handle_a_packet(type.value(), addr_str, port, fd)) {
-                        spdlog::info("Swapper connection to peer {}:{}, ID: {} ended!", addr_str, port, peer_id);
+                        spdlog::info("swapper connection to peer {}:{}, ID: {} ended!", addr_str, port, peer_id);
                         this->peers.del(fd);
                     }
                 }
             } else if (epollfd.check_fd_in_result(events, this->faultfd)) {
                 // Page fault?
                 // Read the page fault information
-                const auto fault = Swapper::faultfd.read();
+                const auto fault = swapper::faultfd.read();
                 const auto frame_id = get_frame_number(fault.address);
                 const auto base_address = round_down_to_page_boundary(fault.address);
                 const auto current_state = this->states[frame_id].load(std::memory_order_acquire);
 
-                spdlog::trace("Swapper processing frame {} @ {}, state: {}, is_write: {}",
+                spdlog::trace("swapper processing frame {} @ {}, state: {}, is_write: {}",
                     frame_id,
                     fault.address,
                     state_to_string(current_state),
@@ -577,21 +579,21 @@ class Swapper : public PeerNode {
             for (std::size_t frame_id = 0; frame_id < n_pages; ++frame_id) {
                 if (this->out_standing_reads[frame_id].load(std::memory_order_acquire)) {
                     spdlog::debug("Timeout, asking frame {} again", frame_id);
-                    this->peers.broadcast(Packet::AskPagePacket{ .frame_id = frame_id });
+                    this->peers.broadcast(packet::ask_page_packet{ .frame_id = frame_id });
                 }
 
                 {
                     std::scoped_lock<std::mutex> lk{this->fencing_mutex[frame_id]};
                     if (this->out_standing_writes[frame_id] == true) {
                         spdlog::debug("Timeout, taking ownership of frame {} again", frame_id);
-                        this->peers.broadcast(Packet::MyPagePacket{ .frame_id = frame_id });
+                        this->peers.broadcast(packet::my_page_packet{ .frame_id = frame_id });
                     }
                 }
             }
         }
     }
 
-    bool handle_lock(const FileDescriptor&, const Packet::LockPacket& msg) final {
+    bool handle_lock(const FileDescriptor&, const packet::lock_packet& msg) final {
         {
             std::scoped_lock<std::mutex> lk{this->lock_mutex};
             auto& ref = this->out_standing_locks[std::make_tuple(msg.address, msg.size)];
@@ -601,12 +603,12 @@ class Swapper : public PeerNode {
         return false;
     }
 
-    bool handle_no_lock(const FileDescriptor&, const Packet::NoLockPacket& msg) final {
+    bool handle_no_lock(const FileDescriptor&, const packet::no_lock_packet& msg) final {
         SPDLOG_ASSERT_DUMP_IF_ERROR(true, "Failed to Lock 0x{:x}, size: {}, not on page or 64 byte boundary?", msg.address, msg.size);
         return false;
     }
 
-    bool handle_unlock(const FileDescriptor&, const Packet::UnlockPacket& msg) final {
+    bool handle_unlock(const FileDescriptor&, const packet::unlock_packet& msg) final {
         {
             std::scoped_lock<std::mutex> lk{this->unlock_mutex};
             auto& ref = this->out_standing_unlocks[std::make_tuple(msg.address, msg.size)];
@@ -616,8 +618,10 @@ class Swapper : public PeerNode {
         return false;
     }
 
-    bool handle_no_unlock(const FileDescriptor&, const Packet::NoUnlockPacket& msg) final {
+    bool handle_no_unlock(const FileDescriptor&, const packet::no_unlock_packet& msg) final {
         SPDLOG_ASSERT_DUMP_IF_ERROR(true, "Failed to Unlock 0x{:x}, size: {}, unlock something that is not locked?", msg.address, msg.size);
         return false;
     }
 };
+
+}  // namespace tDSM
