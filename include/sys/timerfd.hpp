@@ -7,8 +7,8 @@
 #include <vector>
 #include <tuple>
 
-#include "logging.hpp"
-#include "fd.hpp"
+#include "sys/fd.hpp"
+#include "utils/logging.hpp"
 
 class TimerFd : public FileDescriptor {
  public:

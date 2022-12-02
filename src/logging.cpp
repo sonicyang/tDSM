@@ -1,3 +1,5 @@
+#include <cstdlib>
+
 #include <spdlog/spdlog.h>
 
 static __attribute__((constructor(101))) inline auto init_logging() {

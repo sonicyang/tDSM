@@ -9,25 +9,25 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <condition_variable>
+#include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
-#include <spdlog/spdlog.h>
+#include <shared_mutex>
 #include <string>
 #include <thread>
-#include <map>
-#include <functional>
-#include <mutex>
-#include <shared_mutex>
-#include <condition_variable>
 #include <unordered_map>
-#include <semaphore>
+
+#include <spdlog/spdlog.h>
 
 #include "configs.hpp"
-#include "logging.hpp"
-#include "fd.hpp"
-#include "epoll.hpp"
 #include "packet.hpp"
-#include "cancelable_thread.hpp"
+#include "sys/fd.hpp"
+#include "sys/epoll.hpp"
+#include "utils/cancelable_thread.hpp"
+#include "utils/logging.hpp"
 
 namespace tDSM {
 

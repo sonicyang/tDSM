@@ -12,10 +12,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+
 #include <spdlog/spdlog.h>
 
-#include "logging.hpp"
-#include "fd.hpp"
+#include "sys/fd.hpp"
+#include "utils/logging.hpp"
 
 static inline auto userfaultfd(int flags) {
     return static_cast<int>(syscall(__NR_userfaultfd, flags));

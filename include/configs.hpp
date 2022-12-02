@@ -4,7 +4,7 @@
 #include <type_traits>
 #include <spdlog/spdlog.h>
 
-#include "logging.hpp"
+#include "utils/logging.hpp"
 
 static inline constexpr auto page_size = 0x1000;  // 4KB, assumed
 static inline constexpr auto n_pages = 8;

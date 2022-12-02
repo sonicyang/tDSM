@@ -7,11 +7,11 @@
 #include <optional>
 #include <spdlog/spdlog.h>
 
-#include "compiler.hpp"
-#include "better_enum.hpp"
 #include "configs.hpp"
-#include "logging.hpp"
-#include "fd.hpp"
+#include "sys/fd.hpp"
+#include "utils/compiler.hpp"
+#include "utils/better_enum.hpp"
+#include "utils/logging.hpp"
 
 #define DEFINE_PACKET(name, ...) \
     struct name##_packet { \
