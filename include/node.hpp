@@ -69,7 +69,7 @@ class Node {
     static constexpr auto max_concurrent_connection = 16;
 
     // The listener thread
-    FileDescriptor listener_fd;
+    sys::file_descriptor listener_fd;
     utils::cancelable_thread listener_thread{};
 
     static inline auto addr_to_string(const struct in_addr& addr) {
@@ -89,8 +89,8 @@ class Node {
 
     virtual void listener() = 0;
 
-    inline void handler(const std::string& addr_str, const std::uint16_t port, FileDescriptor& fd, utils::cancelable_thread& this_thread) {
-        const auto epollfd = Epoll(fd, this_thread.evtfd);
+    inline void handler(const std::string& addr_str, const std::uint16_t port, sys::file_descriptor& fd, utils::cancelable_thread& this_thread) {
+        const auto epollfd = sys::epoll(fd, this_thread.evtfd);
         while (!this_thread.stopped.load(std::memory_order_acquire)) {
             // Wait for event
             const auto [count, events] = epollfd.wait();
@@ -118,7 +118,7 @@ class Node {
     }
 
     template<typename T>
-    inline auto forward_packet(const FileDescriptor& fd, const auto& func) {
+    inline auto forward_packet(const sys::file_descriptor& fd, const auto& func) {
         const auto msg = packet::recv<T>(fd);
         if (!msg.has_value()) {
             return true;
@@ -126,7 +126,7 @@ class Node {
         return func(this, fd, msg.value());
     }
 
-    inline bool handle_a_packet(const packet::packet_type& type, const std::string& addr_str, const std::uint16_t port, const FileDescriptor& fd) {
+    inline bool handle_a_packet(const packet::packet_type& type, const std::string& addr_str, const std::uint16_t port, const sys::file_descriptor& fd) {
         bool err = false;
         bool ret = false;
 
@@ -194,82 +194,82 @@ class Node {
         return ret;
     }
 
-    bool handle_ping(const FileDescriptor& fd, const packet::ping_packet& msg) {
+    bool handle_ping(const sys::file_descriptor& fd, const packet::ping_packet& msg) {
         spdlog::trace("ping!");
         return packet::send(fd, packet::pong_packet{ .magic = msg.magic });
     }
 
-    bool handle_pong(const FileDescriptor&, const packet::pong_packet&) {
+    bool handle_pong(const sys::file_descriptor&, const packet::pong_packet&) {
         spdlog::trace("pong!");
         return false;
     }
 
-    bool handle_ack(const FileDescriptor&, const packet::ack_packet&) {
+    bool handle_ack(const sys::file_descriptor&, const packet::ack_packet&) {
         spdlog::trace("Got ack!");
         return false;
     }
 
-    virtual bool handle_ask_port(const FileDescriptor&, const packet::ask_port_packet&) {
+    virtual bool handle_ask_port(const sys::file_descriptor&, const packet::ask_port_packet&) {
         spdlog::warn("Ignoring a ask_port packet");
         return false;
     }
 
-    virtual bool handle_report_port(const FileDescriptor&, const packet::report_port_packet&) {
+    virtual bool handle_report_port(const sys::file_descriptor&, const packet::report_port_packet&) {
         spdlog::warn("Ignoring a report_port packet");
         return false;
     }
 
-    virtual bool handle_register_peer(const FileDescriptor&, const packet::register_peer_packet&) {
+    virtual bool handle_register_peer(const sys::file_descriptor&, const packet::register_peer_packet&) {
         spdlog::warn("Ignoring a register_peer packet");
         return false;
     }
 
-    virtual bool handle_unregister_peer(const FileDescriptor&, const packet::unregister_peer_packet&) {
+    virtual bool handle_unregister_peer(const sys::file_descriptor&, const packet::unregister_peer_packet&) {
         spdlog::warn("Ignoring a unregister_peer packet");
         return false;
     }
 
-    virtual bool handle_my_id(const FileDescriptor&, const packet::my_id_packet&) {
+    virtual bool handle_my_id(const sys::file_descriptor&, const packet::my_id_packet&) {
         spdlog::warn("Ignoring a my_id packet");
         return false;
     }
 
-    virtual bool handle_ask_page(const FileDescriptor&, const packet::ask_page_packet&) {
+    virtual bool handle_ask_page(const sys::file_descriptor&, const packet::ask_page_packet&) {
         spdlog::warn("Ignoring a ask_page packet");
         return false;
     }
 
-    virtual bool handle_send_page(const FileDescriptor&, const packet::send_page_packet&) {
+    virtual bool handle_send_page(const sys::file_descriptor&, const packet::send_page_packet&) {
         spdlog::warn("Ignoring a send_page packet");
         return false;
     }
 
-    virtual bool handle_my_page(const FileDescriptor&, const packet::my_page_packet&) {
+    virtual bool handle_my_page(const sys::file_descriptor&, const packet::my_page_packet&) {
         spdlog::warn("Ignoring a my_page packet");
         return false;
     }
 
-    virtual bool handle_your_page(const FileDescriptor&, const packet::your_page_packet&) {
+    virtual bool handle_your_page(const sys::file_descriptor&, const packet::your_page_packet&) {
         spdlog::warn("Ignoring a your_page packet");
         return false;
     }
 
-    virtual bool handle_lock(const FileDescriptor&, const packet::lock_packet&) {
+    virtual bool handle_lock(const sys::file_descriptor&, const packet::lock_packet&) {
         spdlog::warn("Ignoring a lock packet");
         return false;
     }
 
-    virtual bool handle_no_lock(const FileDescriptor&, const packet::no_lock_packet&) {
+    virtual bool handle_no_lock(const sys::file_descriptor&, const packet::no_lock_packet&) {
         spdlog::warn("Ignoring a no_lock packet");
         return false;
     }
 
-    virtual bool handle_unlock(const FileDescriptor&, const packet::unlock_packet&) {
+    virtual bool handle_unlock(const sys::file_descriptor&, const packet::unlock_packet&) {
         spdlog::warn("Ignoring a unlock packet");
         return false;
     }
 
-    virtual bool handle_no_unlock(const FileDescriptor&, const packet::no_unlock_packet&) {
+    virtual bool handle_no_unlock(const sys::file_descriptor&, const packet::no_unlock_packet&) {
         spdlog::warn("Ignoring a no_unlock packet");
         return false;
     }
@@ -297,20 +297,20 @@ class MasterNode : public Node {
         std::string addr_str;
         struct in_addr addr;
         std::uint16_t port;
-        FileDescriptor fd;
+        sys::file_descriptor fd;
         utils::cancelable_thread thread{};
         Peer(
             const std::size_t id_,
             const std::string& addr_str_,
             const struct in_addr& addr_,
             const std::uint16_t port_,
-            FileDescriptor&& fd_) : id(id_), addr_str(addr_str_), addr(addr_), port(port_), fd(std::move(fd_)) {}
+            sys::file_descriptor&& fd_) : id(id_), addr_str(addr_str_), addr(addr_), port(port_), fd(std::move(fd_)) {}
     };
     std::atomic_uint64_t number_of_peers{0};
     std::map<int, std::unique_ptr<Peer>> peers{};
     mutable std::mutex peers_mutex{};
 
-    inline decltype(auto) add_peer(const std::uint64_t peer_id, const std::string& addr_str, const struct in_addr& addr, const std::uint16_t port, FileDescriptor&& fd) {
+    inline decltype(auto) add_peer(const std::uint64_t peer_id, const std::string& addr_str, const struct in_addr& addr, const std::uint16_t port, sys::file_descriptor&& fd) {
         std::scoped_lock<std::mutex> lk{this->peers_mutex};
         // Add to the list of clients/peers
         const auto fd_value = fd.get();
@@ -325,7 +325,7 @@ class MasterNode : public Node {
     }
 
     void listener() override {
-        const auto epollfd = Epoll(this->listener_fd, this->listener_thread.evtfd);
+        const auto epollfd = sys::epoll(this->listener_fd, this->listener_thread.evtfd);
         while (!this->listener_thread.stopped.load(std::memory_order_acquire)) {
             spdlog::trace("Master waiting for peers to connect");
 
@@ -337,7 +337,7 @@ class MasterNode : public Node {
 
             struct sockaddr_in incomming_peer{};
             socklen_t incomming_peer_size = sizeof(incomming_peer);
-            auto client_fd = FileDescriptor{::accept(this->listener_fd.get(), reinterpret_cast<struct sockaddr*>(&incomming_peer), &incomming_peer_size)};
+            auto client_fd = sys::file_descriptor{::accept(this->listener_fd.get(), reinterpret_cast<struct sockaddr*>(&incomming_peer), &incomming_peer_size)};
             tDSM_SPDLOG_DUMP_IF_ERROR_WITH_ERRNO(client_fd.get() < 0, "Failed to accept a connection") {
                 continue;
             }
@@ -400,7 +400,7 @@ class MasterNode : public Node {
     mutable std::mutex state_mutex[n_pages]{};
     std::unordered_map<std::uintptr_t, std::mutex> line_mutex[n_pages];
 
-    bool handle_lock(const FileDescriptor& fd, const packet::lock_packet& msg) final {
+    bool handle_lock(const sys::file_descriptor& fd, const packet::lock_packet& msg) final {
         auto& peer           = this->peers[fd.get()];
         const auto peer_id   = peer->id;
         const auto& addr_str = peer->addr_str;
@@ -440,7 +440,7 @@ class MasterNode : public Node {
         return false;
     }
 
-    bool handle_unlock(const FileDescriptor& fd, const packet::unlock_packet& msg) final {
+    bool handle_unlock(const sys::file_descriptor& fd, const packet::unlock_packet& msg) final {
         auto& peer           = this->peers[fd.get()];
         const auto peer_id   = peer->id;
         const auto& addr_str = peer->addr_str;
@@ -487,14 +487,14 @@ class PeerNode : public Node {
     class Peers {
          public:
             template<typename... Ts>
-            auto inline add(FileDescriptor&& fd, Ts&&... ts) {
+            auto inline add(sys::file_descriptor&& fd, Ts&&... ts) {
                 std::scoped_lock<std::mutex> lk{this->mutex};
                 this->epollfd.add_fd(fd);
                 const auto fd_value = fd.get();
                 this->peers.emplace(fd_value, Peer{std::move(fd), std::forward<Ts>(ts)...});
             }
 
-            auto inline del(FileDescriptor& fd) {
+            auto inline del(sys::file_descriptor& fd) {
                 std::scoped_lock<std::mutex> lk{this->mutex};
                 if (fd.get() >= 0) {
                     packet::send(fd, packet::disconnect_packet{});
@@ -515,20 +515,20 @@ class PeerNode : public Node {
                 this->peers.clear();
             }
 
-            const Epoll& get_epoll_fd() const {
+            const sys::epoll& get_epoll_fd() const {
                 return this->epollfd;
             }
 
             struct Peer {
-                FileDescriptor fd;
+                sys::file_descriptor fd;
                 std::uint64_t id;
                 std::string addr_str;
                 std::uint16_t port;
-                Peer(FileDescriptor&& fd_, const std::uint64_t id_, const std::string& addr_str_, const std::uint16_t port_)
+                Peer(sys::file_descriptor&& fd_, const std::uint64_t id_, const std::string& addr_str_, const std::uint16_t port_)
                     : fd(std::move(fd_)), id(id_), addr_str(addr_str_), port(port_) {}
             };
             std::unordered_map<int, Peer> peers{};
-            Epoll epollfd{};
+            sys::epoll epollfd{};
             mutable std::mutex mutex{};
 
             std::optional<Peer*> operator[](const int fd_to_find) {
@@ -561,7 +561,7 @@ class PeerNode : public Node {
     const std::uint16_t my_port;
 
     // master <-> client
-    FileDescriptor master_fd;
+    sys::file_descriptor master_fd;
     utils::cancelable_thread master_communication_thread{};
 
     PeerNode(const std::string master_ip_, const std::uint16_t my_port_) : Node(my_port_), master_ip(master_ip_), my_port(my_port_), master_fd(socket(AF_INET, SOCK_STREAM, 0)) {
@@ -599,7 +599,7 @@ class PeerNode : public Node {
 
  private:
     void listener() override {
-        const auto epollfd = Epoll(this->listener_fd, this->listener_thread.evtfd);
+        const auto epollfd = sys::epoll(this->listener_fd, this->listener_thread.evtfd);
         while (!this->listener_thread.stopped.load(std::memory_order_acquire)) {
             spdlog::trace("Waiting for peers to connect");
 
@@ -611,7 +611,7 @@ class PeerNode : public Node {
 
             struct sockaddr_in incomming_peer{};
             socklen_t incomming_peer_size = sizeof(incomming_peer);
-            auto peer_fd = FileDescriptor{::accept(this->listener_fd.get(), reinterpret_cast<struct sockaddr*>(&incomming_peer), &incomming_peer_size)};
+            auto peer_fd = sys::file_descriptor{::accept(this->listener_fd.get(), reinterpret_cast<struct sockaddr*>(&incomming_peer), &incomming_peer_size)};
             tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
                 peer_fd.get() < 0,
                 "Failed to accept a connection"
@@ -641,14 +641,14 @@ class PeerNode : public Node {
         }
     }
 
-    bool handle_register_peer(const FileDescriptor& fd, const packet::register_peer_packet& msg) final {
+    bool handle_register_peer(const sys::file_descriptor& fd, const packet::register_peer_packet& msg) final {
         if (msg.peer_id > my_id) {  // New peer connected into the federation, connect and make p2p channel
             struct sockaddr_in peer_addr{};
             peer_addr.sin_family = AF_INET;
             peer_addr.sin_addr.s_addr = msg.addr;
             peer_addr.sin_port = htons(msg.port);
 
-            auto peer_fd = FileDescriptor{socket(AF_INET, SOCK_STREAM, 0)};
+            auto peer_fd = sys::file_descriptor{socket(AF_INET, SOCK_STREAM, 0)};
             tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
                 peer_fd.get() < 0,
                 "Failed to create the socket for peer"
@@ -680,7 +680,7 @@ class PeerNode : public Node {
         return packet::send(fd, packet::ack_packet{});
     }
 
-    bool handle_ask_port(const FileDescriptor& fd, const packet::ask_port_packet& msg) final {
+    bool handle_ask_port(const sys::file_descriptor& fd, const packet::ask_port_packet& msg) final {
         this->my_id = msg.peer_id;
         spdlog::trace("Report my port is {}", this->my_port);
         spdlog::trace("My ID is assigned as {}", this->my_id);

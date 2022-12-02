@@ -4,17 +4,19 @@
 #include <cassert>
 #include <spdlog/spdlog.h>
 
-class FileDescriptor {
+namespace tDSM::sys {
+
+class file_descriptor {
  public:
-    explicit FileDescriptor(const int fd_) : fd(fd_) {}
+    explicit file_descriptor(const int fd_) : fd(fd_) {}
 
-    FileDescriptor(const FileDescriptor&) = delete;
-    FileDescriptor& operator=(const FileDescriptor&) = delete;
+    file_descriptor(const file_descriptor&) = delete;
+    file_descriptor& operator=(const file_descriptor&) = delete;
 
-    FileDescriptor(FileDescriptor&& rhs) : fd(rhs.fd) {
+    file_descriptor(file_descriptor&& rhs) : fd(rhs.fd) {
         rhs.fd = -1;
     }
-    FileDescriptor& operator=(FileDescriptor&& rhs) {
+    file_descriptor& operator=(file_descriptor&& rhs) {
         this->fd = rhs.fd;
         rhs.fd = -1;
         return *this;
@@ -31,10 +33,12 @@ class FileDescriptor {
         }
     }
 
-    virtual ~FileDescriptor() {
+    virtual ~file_descriptor() {
         this->release();
     }
 
  protected:
     int fd;
 };
+
+}  // namesapce tDSM::sys

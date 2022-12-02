@@ -136,7 +136,7 @@ class swapper : public PeerNode {
         // Fill 0
         std::fill_n(rdma_memory, rdma_size, 0);
 
-        spdlog::info("Initializing UserFaultFd...");
+        spdlog::info("Initializing user_fault_fd...");
         // Initialize userfaulefd
         this->faultfd.watch(rdma_memory, rdma_size);
 
@@ -172,13 +172,13 @@ class swapper : public PeerNode {
 
     // Transmission timeout monitor
     utils::cancelable_thread timeout_monitor{std::thread{[this] { this->timeout_monitor_handler(); }}};
-    TimerFd timeout_timer_fd{};
+    sys::timer_fd timeout_timer_fd{};
 
     // The worker thread
     utils::cancelable_thread thread{};
     // Backing memory and memory management
-    const FileDescriptor backing_memory_fd;
-    UserFaultFd faultfd = UserFaultFd();
+    const sys::file_descriptor backing_memory_fd;
+    sys::user_fault_fd faultfd{};
 
     enum class state {
         SHARED,
@@ -303,7 +303,7 @@ class swapper : public PeerNode {
         states[frame_id].store(state::OWNED, order);
     }
 
-    bool handle_ask_page(const FileDescriptor& fd, const packet::ask_page_packet& msg) final {
+    bool handle_ask_page(const sys::file_descriptor& fd, const packet::ask_page_packet& msg) final {
         // Someone is asking for a page
         auto peer = this->peers[fd.get()];
         if (!peer.has_value()) {  // Already closed?
@@ -344,7 +344,7 @@ class swapper : public PeerNode {
         return false;
     }
 
-    bool handle_send_page(const FileDescriptor& fd, const packet::send_page_packet& msg) final {
+    bool handle_send_page(const sys::file_descriptor& fd, const packet::send_page_packet& msg) final {
         // Someone is sending a data of a page to me
         const auto frame_id = msg.frame_id;
         bool request_outstanding = true;
@@ -399,7 +399,7 @@ class swapper : public PeerNode {
         return false;
     }
 
-    bool handle_my_page(const FileDescriptor& fd, const packet::my_page_packet& msg) final {
+    bool handle_my_page(const sys::file_descriptor& fd, const packet::my_page_packet& msg) final {
         // Someone is taking the ownership of a page
         const auto frame_id = msg.frame_id;
         const auto base_address = get_frame_address(msg.frame_id);
@@ -446,7 +446,7 @@ class swapper : public PeerNode {
         return false;
     }
 
-    bool handle_your_page(const FileDescriptor& fd, const packet::your_page_packet& msg) final {
+    bool handle_your_page(const sys::file_descriptor& fd, const packet::your_page_packet& msg) final {
         // Someone is responding the request we want to take ownership of the page
         auto peer = this->peers[fd.get()];
         if (!peer.has_value()) {  // Already closed?
@@ -473,7 +473,7 @@ class swapper : public PeerNode {
 
     // Actual worker thread function
     inline void run() {
-        const auto epollfd = Epoll(this->faultfd, this->peers.get_epoll_fd(), this->thread.evtfd);
+        const auto epollfd = sys::epoll(this->faultfd, this->peers.get_epoll_fd(), this->thread.evtfd);
         while (!this->thread.stopped.load(std::memory_order_acquire)) {
             // Wait for page fault or remote call
             const auto [count, events] = epollfd.wait();
@@ -481,7 +481,7 @@ class swapper : public PeerNode {
                 continue;
             } else if (epollfd.check_fd_in_result(events, this->peers.get_epoll_fd())) {
                 // Remote messages
-                std::vector<FileDescriptor*> peers_to_recycle;
+                std::vector<sys::file_descriptor*> peers_to_recycle;
                 const auto [msg_count, msg_events] = this->peers.get_epoll_fd().wait();  // should not block
                 for (const auto& event : msg_events) {
                     auto  peer           = this->peers[event.data.fd];
@@ -565,7 +565,7 @@ class swapper : public PeerNode {
             }
         );
 
-        const auto epollfd = Epoll(this->timeout_timer_fd, this->thread.evtfd);
+        const auto epollfd = sys::epoll(this->timeout_timer_fd, this->thread.evtfd);
         while (!this->thread.stopped.load(std::memory_order_acquire)) {
             // Wait for page fault or remote call
             const auto [count, events] = epollfd.wait();
@@ -593,7 +593,7 @@ class swapper : public PeerNode {
         }
     }
 
-    bool handle_lock(const FileDescriptor&, const packet::lock_packet& msg) final {
+    bool handle_lock(const sys::file_descriptor&, const packet::lock_packet& msg) final {
         {
             std::scoped_lock<std::mutex> lk{this->lock_mutex};
             auto& ref = this->out_standing_locks[std::make_tuple(msg.address, msg.size)];
@@ -603,12 +603,12 @@ class swapper : public PeerNode {
         return false;
     }
 
-    bool handle_no_lock(const FileDescriptor&, const packet::no_lock_packet& msg) final {
+    bool handle_no_lock(const sys::file_descriptor&, const packet::no_lock_packet& msg) final {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(true, "Failed to Lock 0x{:x}, size: {}, not on page or 64 byte boundary?", msg.address, msg.size);
         return false;
     }
 
-    bool handle_unlock(const FileDescriptor&, const packet::unlock_packet& msg) final {
+    bool handle_unlock(const sys::file_descriptor&, const packet::unlock_packet& msg) final {
         {
             std::scoped_lock<std::mutex> lk{this->unlock_mutex};
             auto& ref = this->out_standing_unlocks[std::make_tuple(msg.address, msg.size)];
@@ -618,7 +618,7 @@ class swapper : public PeerNode {
         return false;
     }
 
-    bool handle_no_unlock(const FileDescriptor&, const packet::no_unlock_packet& msg) final {
+    bool handle_no_unlock(const sys::file_descriptor&, const packet::no_unlock_packet& msg) final {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(true, "Failed to Unlock 0x{:x}, size: {}, unlock something that is not locked?", msg.address, msg.size);
         return false;
     }

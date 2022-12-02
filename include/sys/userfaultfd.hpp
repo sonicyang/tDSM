@@ -18,6 +18,8 @@
 #include "sys/fd.hpp"
 #include "utils/logging.hpp"
 
+namespace tDSM::sys {
+
 static inline auto userfaultfd(int flags) {
     return static_cast<int>(syscall(__NR_userfaultfd, flags));
 }
@@ -31,12 +33,12 @@ struct page_fault {
     const pid_t tid;
 };
 
-class UserFaultFd : public FileDescriptor {
+class user_fault_fd : public file_descriptor {
  public:
-    UserFaultFd() : FileDescriptor(userfaultfd(O_NONBLOCK)) {
+    user_fault_fd() : file_descriptor(userfaultfd(O_NONBLOCK)) {
         // Initialize userfaulefd, no blocking on normal read
         if (this->fd < 0) {
-            spdlog::error("Failed to create UserFaultFd: {}", strerror(errno));
+            spdlog::error("Failed to create user_fault_fd: {}", strerror(errno));
             abort();
         }
 
@@ -66,7 +68,7 @@ class UserFaultFd : public FileDescriptor {
     }
 
     inline auto watch(volatile void* const addr, const std::size_t len) {
-        spdlog::debug("UserFaultFd start watch pages @ {}, length: {}", const_cast<void*>(addr), len);
+        spdlog::debug("user_fault_fd start watch pages @ {}, length: {}", const_cast<void*>(addr), len);
         uffdio_register register_msg = {
             .range = {
                 .start = reinterpret_cast<std::uintptr_t>(addr),
@@ -83,7 +85,7 @@ class UserFaultFd : public FileDescriptor {
     }
 
     inline auto stop_watch(volatile void* const addr, const std::size_t len) {
-        spdlog::debug("UserFaultFd stop watch pages @ {}, length: {}", const_cast<void*>(addr), len);
+        spdlog::debug("user_fault_fd stop watch pages @ {}, length: {}", const_cast<void*>(addr), len);
         uffdio_range range_msg = {
             .start = reinterpret_cast<std::uintptr_t>(addr),
             .len = len
@@ -108,7 +110,7 @@ class UserFaultFd : public FileDescriptor {
             "Event not supported!"
         );
 
-        spdlog::debug("UserFaultFd captured a page fault from {} @ {}, flags:{}",
+        spdlog::debug("user_fault_fd captured a page fault from {} @ {}, flags:{}",
             static_cast<pid_t>(msg.arg.pagefault.feat.ptid),
             reinterpret_cast<void*>(msg.arg.pagefault.address),
             flag_to_string(msg.arg.pagefault.flags));
@@ -124,7 +126,7 @@ class UserFaultFd : public FileDescriptor {
     }
 
     inline auto write_protect(volatile void* const addr, const std::size_t len) {
-        spdlog::debug("UserFaultFd write protect pages @ {}, length: {}", const_cast<void*>(addr), len);
+        spdlog::debug("user_fault_fd write protect pages @ {}, length: {}", const_cast<void*>(addr), len);
         uffdio_writeprotect wp_msg {
             .range = {
                 .start = reinterpret_cast<std::uintptr_t>(addr),
@@ -140,7 +142,7 @@ class UserFaultFd : public FileDescriptor {
     }
 
     inline auto write_unprotect(volatile void* const addr, const std::size_t len) {
-        spdlog::debug("UserFaultFd write unprotect pages @ {}, length: {}", const_cast<void*>(addr), len);
+        spdlog::debug("user_fault_fd write unprotect pages @ {}, length: {}", const_cast<void*>(addr), len);
 
         uffdio_writeprotect wp_msg {
             .range = {
@@ -157,7 +159,7 @@ class UserFaultFd : public FileDescriptor {
     }
 
     inline auto zero(volatile void* const addr, const std::size_t len) {
-        spdlog::debug("UserFaultFd zero a page @ {}, length: {}", const_cast<void*>(addr), len);
+        spdlog::debug("user_fault_fd zero a page @ {}, length: {}", const_cast<void*>(addr), len);
 
         uffdio_zeropage zeropg{
             .range = {
@@ -175,7 +177,7 @@ class UserFaultFd : public FileDescriptor {
     }
 
     inline auto continue_(volatile void* const addr, const std::size_t len) {
-        spdlog::debug("UserFaultFd continue a page @ {}, length: {}", const_cast<void*>(addr), len);
+        spdlog::debug("user_fault_fd continue a page @ {}, length: {}", const_cast<void*>(addr), len);
 
         uffdio_continue cont{
             .range = {
@@ -193,7 +195,7 @@ class UserFaultFd : public FileDescriptor {
     }
 
     inline auto wake(volatile void* const addr, const std::size_t len) {
-        spdlog::debug("UserFaultFd wake thread waiting on page @ {}, length: {}", const_cast<void*>(addr), len);
+        spdlog::debug("user_fault_fd wake thread waiting on page @ {}, length: {}", const_cast<void*>(addr), len);
 
         uffdio_range range_msg = {
             .start = reinterpret_cast<std::uintptr_t>(addr),
@@ -206,3 +208,5 @@ class UserFaultFd : public FileDescriptor {
         );
     }
 };
+
+}  // tDSM::sys

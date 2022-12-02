@@ -10,16 +10,18 @@
 #include "sys/fd.hpp"
 #include "utils/logging.hpp"
 
-class TimerFd : public FileDescriptor {
+namespace tDSM::sys {
+
+class timer_fd : public file_descriptor {
  public:
-    TimerFd() : FileDescriptor(::timerfd_create(CLOCK_MONOTONIC, 0)) {
+    timer_fd() : file_descriptor(::timerfd_create(CLOCK_MONOTONIC, 0)) {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(this->fd < 0, "Failed to create timerfd");
     }
 
-    TimerFd(const TimerFd&) = delete;
-    TimerFd& operator=(const TimerFd&) = delete;
-    TimerFd(TimerFd&&) = delete;
-    TimerFd& operator=(TimerFd&&) = delete;
+    timer_fd(const timer_fd&) = delete;
+    timer_fd& operator=(const timer_fd&) = delete;
+    timer_fd(timer_fd&&) = delete;
+    timer_fd& operator=(timer_fd&&) = delete;
 
     inline void one_shot(const struct timespec& deadline, const int flags = 0) {
         struct itimerspec utmr = {
@@ -51,3 +53,5 @@ class TimerFd : public FileDescriptor {
             "Failed to disarm the timerfd");
     }
 };
+
+}  // namespace tDSM::sys

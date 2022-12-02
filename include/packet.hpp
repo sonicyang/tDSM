@@ -118,7 +118,7 @@ namespace tDSM::packet {
 
     // XXX: Add traits as protection
     template<typename T>
-    static inline auto send(const FileDescriptor& fd, const T& packet, const void* const data = nullptr, const std::size_t length = 0) {
+    static inline auto send(const sys::file_descriptor& fd, const T& packet, const void* const data = nullptr, const std::size_t length = 0) {
         auto remain = sizeof(T);
         while (remain) {
             const auto ret = ::send(fd.get(), reinterpret_cast<const std::uint8_t*>(&packet) + (sizeof(T) - remain), remain, 0);
@@ -139,7 +139,7 @@ namespace tDSM::packet {
         return false;
     }
 
-    static inline std::optional<packet_type> peek_packet_type(const FileDescriptor& fd) {
+    static inline std::optional<packet_type> peek_packet_type(const sys::file_descriptor& fd) {
         packet_header hdr;
         if (::recv(fd.get(), &hdr, sizeof(hdr), MSG_PEEK) != sizeof(hdr)) {
             return {};
@@ -147,7 +147,7 @@ namespace tDSM::packet {
         return static_cast<packet_type>(hdr.type);
     }
 
-    static inline bool recv(const FileDescriptor& fd, void* const data, const std::size_t length) {
+    static inline bool recv(const sys::file_descriptor& fd, void* const data, const std::size_t length) {
         auto remain = length;
         while (data != nullptr && remain) {
             const auto ret = ::recv(fd.get(), reinterpret_cast<std::uint8_t*>(data) + (length - remain), remain, 0);
@@ -160,7 +160,7 @@ namespace tDSM::packet {
     }
 
     template<typename T>
-    static inline std::optional<T> recv(const FileDescriptor& fd) {
+    static inline std::optional<T> recv(const sys::file_descriptor& fd) {
         T packet;
         if (recv(fd, &packet, sizeof(T))) {
             return {};

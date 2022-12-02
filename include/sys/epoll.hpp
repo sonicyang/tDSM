@@ -9,11 +9,13 @@
 
 #include "fd.hpp"
 
-class Epoll : public FileDescriptor {
+namespace tDSM::sys {
+
+class epoll : public file_descriptor {
  public:
 
     template<typename... Ts>
-    Epoll(const Ts&... ts) : FileDescriptor(::epoll_create(16)) {
+    epoll(const Ts&... ts) : file_descriptor(::epoll_create(16)) {
         if (this->fd < 0) {
             spdlog::error("Failed to create epoll fd");
         }
@@ -22,14 +24,14 @@ class Epoll : public FileDescriptor {
         (this->add_fd(ts), ...);
     }
 
-    Epoll(const Epoll&) = delete;
-    Epoll& operator=(const Epoll&) = delete;
-    Epoll(Epoll&&) = delete;
-    Epoll& operator=(Epoll&&) = delete;
+    epoll(const epoll&) = delete;
+    epoll& operator=(const epoll&) = delete;
+    epoll(epoll&&) = delete;
+    epoll& operator=(epoll&&) = delete;
 
     std::atomic_int nfds{0};
 
-    inline void add_fd(const FileDescriptor& fd_to_add, enum EPOLL_EVENTS events = EPOLLIN) {
+    inline void add_fd(const file_descriptor& fd_to_add, enum EPOLL_EVENTS events = EPOLLIN) {
        struct epoll_event ev;
        ev.events = events;
        ev.data.fd = fd_to_add.get();
@@ -40,7 +42,7 @@ class Epoll : public FileDescriptor {
        this->nfds.fetch_add(1, std::memory_order_release);
     }
 
-    inline void delete_fd(const FileDescriptor& fd_to_delete) {
+    inline void delete_fd(const file_descriptor& fd_to_delete) {
        this->nfds.fetch_sub(1, std::memory_order_acquire);
        if (::epoll_ctl(this->fd, EPOLL_CTL_DEL, fd_to_delete.get(), nullptr) == -1) {
            spdlog::error("epoll_ctl: failed to delete {}: {}", fd_to_delete.get(), strerror(errno));
@@ -55,7 +57,7 @@ class Epoll : public FileDescriptor {
         return std::make_tuple(count, ret);
     }
 
-    static inline bool check_fd_in_result(const std::vector<struct epoll_event>& events, const FileDescriptor& fd_to_check, enum EPOLL_EVENTS to_check = EPOLLIN) {
+    static inline bool check_fd_in_result(const std::vector<struct epoll_event>& events, const file_descriptor& fd_to_check, enum EPOLL_EVENTS to_check = EPOLLIN) {
         for (const auto& event : events) {
             if (event.data.fd == fd_to_check.get()) {
                 return !!(event.events & to_check);
@@ -64,3 +66,5 @@ class Epoll : public FileDescriptor {
         return false;
     }
 };
+
+}  // namespace tDSM::sys

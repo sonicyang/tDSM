@@ -62,7 +62,7 @@ struct cancelable_thread {
         }};
     }
 
-    FileDescriptor evtfd;
+    sys::file_descriptor evtfd;
     std::thread thread;
     std::atomic_bool stopped{false};
 };
