@@ -18,9 +18,11 @@
     static auto inline type_name##_to_string(const type_name e) { \
         static auto str = [] { \
             static auto src = std::string{#__VA_ARGS__}; \
-            std::vector<const char*> ret; \
-            for (std::size_t pos = 0; pos != src.npos; pos = src.find(',')) { \
-                ret.emplace_back(src.c_str() + pos); \
+            std::vector<std::string> ret; \
+            std::size_t pos; \
+            while ((pos = src.find(',')) != std::string::npos) { \
+                ret.emplace_back(src.substr(0, pos)); \
+                src.erase(0, pos + 1); \
             } \
             return ret; \
         }(); \
