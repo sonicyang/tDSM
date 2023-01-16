@@ -62,48 +62,33 @@ class swapper : public peer_node {
         return rdma_size;
     }
 
-    template<typename T>
-    inline auto lock(volatile T* ptr) {
-        const auto address = reinterpret_cast<std::uintptr_t>(ptr);
-        const auto size = 64;
+    inline auto sem_get(const std::uintptr_t address) {
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
+            packet::send(this->master_fd, packet::sem_get_packet{ .address = address }),
+            "Failed send sem get message for 0x{:x}",
+            address
+        );
 
-        const auto line_boundary = address & ~(size - 1);
-        if (address != line_boundary) {
-            spdlog::warn("Locking the whole 64bytes line 0x{:x} resides, possible deadlock");
-        }
+        const auto frame_id = get_frame_number(reinterpret_cast<void*>(address));
+        auto& sem = [&]() -> decltype(auto) {
+            std::scoped_lock<std::mutex> lk{this->sem_list_mutex};
+            if (!this->sem_list[frame_id].contains(address)) {
+                this->sem_list[frame_id].emplace(address, std::make_unique<sem_semaphore>(0));
+            }
+            return this->sem_list[frame_id][address];
+        }();
 
-        this->lock(line_boundary, size);
+        spdlog::trace("Semaphore: get {:x}", address);
+
+        sem->acquire();
     }
 
-    template<typename T>
-    inline auto lock_page(volatile T* ptr) {
-        const auto address = reinterpret_cast<std::uintptr_t>(ptr);
-        const auto size = page_size;
-
-        const auto page_boundary = round_down_to_page_boundary(address);
-        if (address != page_boundary) {
-            spdlog::warn("Locking the whole page 0x{:x} resides");
-        }
-
-        this->lock(page_boundary, size);
-    }
-
-    template<typename T>
-    inline auto unlock(volatile T* ptr) {
-        const auto address = reinterpret_cast<std::uintptr_t>(ptr);
-        const auto size = 64;
-
-        const auto line_boundary = address & ~(size - 1);
-        this->unlock(line_boundary, size);
-    }
-
-    template<typename T>
-    inline auto unlock_page(volatile T* ptr) {
-        const auto address = reinterpret_cast<std::uintptr_t>(ptr);
-        const auto size = page_size;
-
-        const auto page_boundary = round_down_to_page_boundary(address);
-        this->unlock(page_boundary, size);
+    inline auto sem_put(const std::uintptr_t address) {
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
+            packet::send(this->master_fd, packet::sem_put_packet{ .address = address }),
+            "Failed send sem put message for 0x{:x}",
+            address
+        );
     }
 
  private:
@@ -207,53 +192,10 @@ class swapper : public peer_node {
     bool out_standing_writes[n_pages]{};
     std::set<std::size_t> fencing_set[n_pages]{};
 
-    // Locks
-    using Location_t = std::tuple<std::uintptr_t, std::size_t>;
-    struct LocationHash {
-        std::size_t operator()(const Location_t& key) const {
-           return std::get<0>(key) ^ std::get<1>(key);
-         }
-    };
-    mutable std::mutex lock_mutex{};
-    mutable std::mutex unlock_mutex{};
-    std::unordered_map<Location_t, std::pair<bool, std::condition_variable>, LocationHash> out_standing_locks{};
-    std::unordered_map<Location_t, std::pair<bool, std::condition_variable>, LocationHash> out_standing_unlocks{};
-
-    // Utility functions
-    inline auto lock(const std::uintptr_t address, const std::size_t size) {
-        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-            packet::send(this->master_fd, packet::lock_packet{ .address = address, .size = size }),
-            "Failed send locking message for 0x{:x}, size: {}",
-            address, size
-        );
-
-        {
-            std::unique_lock<std::mutex> lk{this->lock_mutex};
-            const auto key = std::make_tuple(address, size);
-            auto& ref = this->out_standing_locks[key];
-            ref.first = false;
-            ref.second.wait(lk, [&ref] { return ref.first; });
-            this->out_standing_locks.erase(key);
-        }
-
-        return;
-    }
-
-    inline auto unlock(const std::uintptr_t address, const std::size_t size) {
-        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-            packet::send(this->master_fd, packet::unlock_packet{ .address = address, .size = size }),
-            "Failed send unlocking message for 0x{:x}, size: {}",
-            address, size
-        );
-
-        {
-            std::unique_lock<std::mutex> lk{this->unlock_mutex};
-            auto& ref = this->out_standing_unlocks[std::make_tuple(address, size)];
-            ref.first = false;
-            ref.second.wait(lk, [&ref] { return ref.first; });
-            this->out_standing_unlocks.erase(std::make_tuple(address, size));
-        }
-    }
+    // Semaphores, zero initialized, 256 is arbitrary
+    using sem_semaphore = std::counting_semaphore<256>;
+    mutable std::mutex sem_list_mutex{};
+    std::unordered_map<std::uintptr_t, std::unique_ptr<sem_semaphore>> sem_list[n_pages]{};
 
     auto inline ask_page(const std::size_t frame_id) {
         // Download the page data from owner
@@ -584,33 +526,19 @@ class swapper : public peer_node {
         }
     }
 
-    bool handle_lock(const sys::file_descriptor&, const packet::lock_packet& msg) final {
-        {
-            std::scoped_lock<std::mutex> lk{this->lock_mutex};
-            auto& ref = this->out_standing_locks[std::make_tuple(msg.address, msg.size)];
-            ref.first = true;
-            ref.second.notify_one();
-        }
-        return false;
-    }
+    bool handle_sem_put(const sys::file_descriptor&, const packet::sem_put_packet& msg) final {
+        const auto frame_id = get_frame_number(reinterpret_cast<void*>(msg.address));
+        auto& sem = [&]() -> decltype(auto) {
+            std::scoped_lock<std::mutex> lk{this->sem_list_mutex};
+            if (!this->sem_list[frame_id].contains(msg.address)) {
+                this->sem_list[frame_id].emplace(msg.address, std::make_unique<sem_semaphore>(0));
+            }
+            return this->sem_list[frame_id][msg.address];
+        }();
 
-    bool handle_no_lock(const sys::file_descriptor&, const packet::no_lock_packet& msg) final {
-        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(true, "Failed to Lock 0x{:x}, size: {}, not on page or 64 byte boundary?", msg.address, msg.size);
-        return false;
-    }
+        spdlog::trace("Semaphore: put {:x}", msg.address);
 
-    bool handle_unlock(const sys::file_descriptor&, const packet::unlock_packet& msg) final {
-        {
-            std::scoped_lock<std::mutex> lk{this->unlock_mutex};
-            auto& ref = this->out_standing_unlocks[std::make_tuple(msg.address, msg.size)];
-            ref.first = true;
-            ref.second.notify_one();
-        }
-        return false;
-    }
-
-    bool handle_no_unlock(const sys::file_descriptor&, const packet::no_unlock_packet& msg) final {
-        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(true, "Failed to Unlock 0x{:x}, size: {}, unlock something that is not locked?", msg.address, msg.size);
+        sem->release(1);
         return false;
     }
 };

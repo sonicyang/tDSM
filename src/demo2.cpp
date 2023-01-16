@@ -16,12 +16,17 @@ int main() {
         //sleep(1);
     //}
 
+    swapper.sem_get(reinterpret_cast<std::uintptr_t>(&memory[1]));
+
     while(true) {
-        swapper.template lock<std::uint8_t>(&memory[0]);
-        spdlog::info("{:x}", memory[0]);
+        swapper.sem_get(reinterpret_cast<std::uintptr_t>(&memory[0]));
+        spdlog::info("{}", memory[0]);
         memory[0] = memory[0] + 1;
-        swapper.template unlock<std::uint8_t>(&memory[0]);
+        swapper.sem_put(reinterpret_cast<std::uintptr_t>(&memory[0]));
         sleep(1);
+        if (memory[0] == 80) {
+            swapper.sem_put(reinterpret_cast<std::uintptr_t>(&memory[1]));
+        }
     }
 
     sleep(5);

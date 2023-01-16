@@ -10,12 +10,13 @@
 #include <atomic>
 #include <cstdint>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <shared_mutex>
+#include <semaphore>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -177,17 +178,11 @@ class Node {
             case packet::packet_type::your_page:
                 err = forward_packet<packet::your_page_packet>(fd, std::mem_fn(&Node::handle_your_page));
                 break;
-            case packet::packet_type::lock:
-                err = forward_packet<packet::lock_packet>(fd, std::mem_fn(&Node::handle_lock));
+            case packet::packet_type::sem_get:
+                err = forward_packet<packet::sem_get_packet>(fd, std::mem_fn(&Node::handle_sem_get));
                 break;
-            case packet::packet_type::no_lock:
-                err = forward_packet<packet::no_lock_packet>(fd, std::mem_fn(&Node::handle_no_lock));
-                break;
-            case packet::packet_type::unlock:
-                err = forward_packet<packet::unlock_packet>(fd, std::mem_fn(&Node::handle_unlock));
-                break;
-            case packet::packet_type::no_unlock:
-                err = forward_packet<packet::no_unlock_packet>(fd, std::mem_fn(&Node::handle_no_unlock));
+            case packet::packet_type::sem_put:
+                err = forward_packet<packet::sem_put_packet>(fd, std::mem_fn(&Node::handle_sem_put));
                 break;
         }
 
@@ -257,23 +252,13 @@ class Node {
         return false;
     }
 
-    virtual bool handle_lock(const sys::file_descriptor&, const packet::lock_packet&) {
-        spdlog::warn("Ignoring a lock packet");
+    virtual bool handle_sem_get(const sys::file_descriptor&, const packet::sem_get_packet&) {
+        spdlog::warn("Ignoring a sem get packet");
         return false;
     }
 
-    virtual bool handle_no_lock(const sys::file_descriptor&, const packet::no_lock_packet&) {
-        spdlog::warn("Ignoring a no_lock packet");
-        return false;
-    }
-
-    virtual bool handle_unlock(const sys::file_descriptor&, const packet::unlock_packet&) {
-        spdlog::warn("Ignoring a unlock packet");
-        return false;
-    }
-
-    virtual bool handle_no_unlock(const sys::file_descriptor&, const packet::no_unlock_packet&) {
-        spdlog::warn("Ignoring a no_unlock packet");
+    virtual bool handle_sem_put(const sys::file_descriptor&, const packet::sem_put_packet&) {
+        spdlog::warn("Ignoring a sem put packet");
         return false;
     }
 };
@@ -398,86 +383,58 @@ class master_node : public Node {
         }
     }
 
-    // Locks, one bit per byte, dictionary address at 64 bytes boundary
-    mutable std::shared_mutex page_mutex[n_pages]{};
-    mutable std::mutex state_mutex[n_pages]{};
-    std::unordered_map<std::uintptr_t, std::mutex> line_mutex[n_pages];
+    // semaphore list
+    mutable std::mutex sem_queue_mutex{};
+    struct sem_state {
+        std::size_t count{};
+        std::deque<const sys::file_descriptor*> queue{};
+    };
+    std::unordered_map<std::uintptr_t, sem_state> sem_queue[n_pages]{};
 
-    bool handle_lock(const sys::file_descriptor& fd, const packet::lock_packet& msg) final {
+    bool handle_sem_get(const sys::file_descriptor& fd, const packet::sem_get_packet& msg) final {
         auto& peer           = this->peers[fd.get()];
         const auto peer_id   = peer->id;
         const auto& addr_str = peer->addr_str;
         const auto port      = peer->port;
 
         const auto frame_id = get_frame_number(reinterpret_cast<void*>(msg.address));
-        const auto aligned_64_address = msg.address & ~(0x40 - 1);  // round down to 64 bytes boundary
-        if (msg.address == reinterpret_cast<std::uintptr_t>(get_frame_address(frame_id)) && msg.size == page_size) {
-            this->page_mutex[frame_id].lock();
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                packet::send(fd, msg),
-                "Failed notify peer {}:{}, ID {} that lock is acquired",
-                addr_str, port, peer_id
-            );
-        } else if (msg.address == aligned_64_address && msg.size == 64) {
-            this->page_mutex[frame_id].lock_shared();
-            {
-                std::scoped_lock<std::mutex> lk{this->state_mutex[frame_id]};
-                this->line_mutex[frame_id][aligned_64_address].lock();
-            }
+        spdlog::trace("Queue sem get at 0x{:x} for {}:{}, ID: {}", msg.address, addr_str, port, peer_id);
 
-            spdlog::trace("Locking 0x{:x}, {} bytes for {}:{}, ID: {}", msg.address, msg.size, addr_str, port, peer_id);
-
+        std::scoped_lock<std::mutex> lk{this->sem_queue_mutex};
+        if (this->sem_queue[frame_id][msg.address].count > 0) {
+            this->sem_queue[frame_id][msg.address].count--;
             tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                packet::send(fd, msg),
-                "Failed notify peer {}:{}, ID {} that lock is acquired",
-                addr_str, port, peer_id
+                packet::send(fd, packet::sem_put_packet{ .address = msg.address }),
+                "Failed sem put on 0x{:x} for {}:{}, ID {}",
+                msg.address, addr_str, port, peer_id
             );
         } else {
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                packet::send(fd, packet::no_lock_packet{ .address = msg.address, .size = msg.size }),
-                "Failed notify peer {}:{}, ID {} that lock failed",
-                addr_str, port, peer_id
-            );
+            this->sem_queue[frame_id][msg.address].queue.emplace_back(&fd);
         }
 
         return false;
     }
 
-    bool handle_unlock(const sys::file_descriptor& fd, const packet::unlock_packet& msg) final {
+    bool handle_sem_put(const sys::file_descriptor& fd, const packet::sem_put_packet& msg) final {
         auto& peer           = this->peers[fd.get()];
         const auto peer_id   = peer->id;
         const auto& addr_str = peer->addr_str;
         const auto port      = peer->port;
 
         const auto frame_id = get_frame_number(reinterpret_cast<void*>(msg.address));
-        const auto aligned_64_address = msg.address & ~(0x40 - 1);  // round down to 64 bytes boundary
+        spdlog::trace("sem put at 0x{:x} for {}:{}, ID: {}", msg.address, addr_str, port, peer_id);
 
-        if (msg.address == reinterpret_cast<std::uintptr_t>(get_frame_address(frame_id)) && msg.size == page_size) {
-            this->page_mutex[frame_id].unlock();
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                packet::send(fd, msg),
-                "Failed notify peer {}:{}, ID {} that unlock succeed",
-                addr_str, port, peer_id
-            );
-        } else if (msg.address == aligned_64_address && msg.size == 64) {
-            spdlog::trace("Unlocking 0x{:x}, {} bytes for {}:{}, ID: {}", msg.address, msg.size, addr_str, port, peer_id);
-
-            {
-                std::scoped_lock<std::mutex> lk{this->state_mutex[frame_id]};
-                this->line_mutex[frame_id][aligned_64_address].unlock();
-            }
-            this->page_mutex[frame_id].unlock_shared();
-
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                packet::send(fd, msg),
-                "Failed notify peer {}:{}, ID {} that unlock succeed",
-                addr_str, port, peer_id
-            );
+        std::scoped_lock<std::mutex> lk{this->sem_queue_mutex};
+        if (this->sem_queue[frame_id][msg.address].queue.empty()) {
+            this->sem_queue[frame_id][msg.address].count++;
         } else {
+            const auto fd_to_wake = this->sem_queue[frame_id][msg.address].queue.front();
+            this->sem_queue[frame_id][msg.address].queue.pop_front();
+
             tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                packet::send(fd, packet::no_unlock_packet{ .address = msg.address, .size = msg.size }),
-                "Failed notify peer {}:{}, ID {} that unlock failed",
-                addr_str, port, peer_id
+                packet::send(*fd_to_wake, packet::sem_put_packet{ .address = msg.address }),
+                "Failed sem wake on 0x{:x} for {}:{}, ID {}",
+                msg.address, addr_str, port, peer_id
             );
         }
 

@@ -34,10 +34,8 @@ namespace tDSM::packet {
         send_page,
         my_page,
         your_page,
-        lock,
-        no_lock,
-        unlock,
-        no_unlock
+        sem_get,
+        sem_put
     );
 
     struct packet_header {
@@ -97,24 +95,12 @@ namespace tDSM::packet {
         std::size_t frame_id = 0x0;
     );
 
-    DEFINE_PACKET(lock,
+    DEFINE_PACKET(sem_get,
         std::uintptr_t address = 0x0;
-        std::size_t size = 0x0;
     );
 
-    DEFINE_PACKET(no_lock,
+    DEFINE_PACKET(sem_put,
         std::uintptr_t address = 0x0;
-        std::size_t size = 0x0;
-    );
-
-    DEFINE_PACKET(unlock,
-        std::uintptr_t address = 0x0;
-        std::size_t size = 0x0;
-    );
-
-    DEFINE_PACKET(no_unlock,
-        std::uintptr_t address = 0x0;
-        std::size_t size = 0x0;
     );
 
     // XXX: Add traits as protection
