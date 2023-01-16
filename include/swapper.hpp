@@ -186,11 +186,13 @@ class swapper : public peer_node {
     std::atomic<state> states[n_pages]{};
 
     // Reading and writing coherence control
-    std::atomic<bool> out_standing_reads[n_pages]{};
+    mutable std::mutex read_fencing_mutex[n_pages]{};
+    std::set<std::size_t> read_fencing_set[n_pages]{};
+    bool out_standing_read[n_pages]{};
 
-    mutable std::mutex fencing_mutex[n_pages]{};
-    bool out_standing_writes[n_pages]{};
-    std::set<std::size_t> fencing_set[n_pages]{};
+    mutable std::mutex write_fencing_mutex[n_pages]{};
+    std::set<std::size_t> write_fencing_set[n_pages]{};
+    bool out_standing_write[n_pages]{};
 
     // Semaphores, zero initialized, 256 is arbitrary
     using sem_semaphore = std::counting_semaphore<256>;
@@ -200,17 +202,24 @@ class swapper : public peer_node {
     auto inline ask_page(const std::size_t frame_id) {
         // Download the page data from owner
         spdlog::trace("Asking frame {}", frame_id);
-        bool request_outstanding = false;
-        if(this->out_standing_reads[frame_id].compare_exchange_strong(request_outstanding, true, std::memory_order_seq_cst)) {
-            this->peers.broadcast(packet::ask_page_packet{ .frame_id = frame_id });
+        {
+            std::scoped_lock<std::mutex> lk{this->read_fencing_mutex[frame_id]};
+            this->read_fencing_set[frame_id].clear();
+            this->out_standing_read[frame_id] = true;
         }
+
+        this->peers.broadcast(packet::ask_page_packet{ .frame_id = frame_id });
     }
 
     auto inline own_page(const std::size_t frame_id) {
+        // Make page exclusive for us
         spdlog::debug("Take ownership of frame {}", frame_id);
-        std::scoped_lock<std::mutex> lk{this->fencing_mutex[frame_id]};
-        this->fencing_set[frame_id].clear();
-        this->out_standing_writes[frame_id] = true;
+        {
+            std::scoped_lock<std::mutex> lk{this->write_fencing_mutex[frame_id]};
+            this->write_fencing_set[frame_id].clear();
+            this->out_standing_write[frame_id] = true;
+        }
+
         this->peers.broadcast(packet::my_page_packet{ .frame_id = frame_id });
     }
 
@@ -257,7 +266,12 @@ class swapper : public peer_node {
 
         const auto frame_id = msg.frame_id;
         const auto base_address = get_frame_address(frame_id);
-        if (this->states[frame_id].load(std::memory_order_acquire) == state::OWNED) {
+        const auto current_state = this->states[frame_id].load(std::memory_order_acquire);
+        if (current_state == state::OWNED) {
+            // no longer exclusive
+            this->set_frame_state_shared(frame_id);
+            this->faultfd.write_protect(base_address, page_size);
+
             // Default if no compressed
             const void* ptr_to_send = base_address;
             std::size_t size_to_send = page_size;
@@ -281,43 +295,65 @@ class swapper : public peer_node {
                 "Failed send a page to peer {}:{}, ID {}",
                 addr_str, port, peer_id
             );
+        } else {
+            // Shared or invalid send a empty packet to indicate that it is notified of the read.
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
+                packet::send(fd, packet::send_page_packet{ .frame_id = frame_id, .size = 0 }, nullptr, 0),
+                "Failed send a page to peer {}:{}, ID {}",
+                addr_str, port, peer_id
+            );
         }
         return false;
     }
 
     bool handle_send_page(const sys::file_descriptor& fd, const packet::send_page_packet& msg) final {
         // Someone is sending a data of a page to me
+        auto peer = this->peers[fd.get()];
+        if (!peer.has_value()) {  // Already closed?
+            return true;
+        }
+        const auto peer_id   = peer.value()->id;
         const auto frame_id = msg.frame_id;
-        bool request_outstanding = true;
 
         constexpr auto data_max_size = LZ4_COMPRESSBOUND(page_size);
 
-        if(this->out_standing_reads[frame_id].compare_exchange_strong(request_outstanding, false, std::memory_order_seq_cst)) {
+        std::scoped_lock<std::mutex> lk{this->read_fencing_mutex[frame_id]};
+        if (this->out_standing_read[frame_id]) {
             const auto base_address = get_frame_address(frame_id);
-            void* address_to_write = base_address;
 
-            std::uint8_t compressed[data_max_size];
+            if (msg.size > 0) {
+                this->faultfd.write_unprotect(base_address, page_size);
 
-            if (this->use_compression) {
-                address_to_write = compressed;
-            }
+                void* address_to_write = base_address;
+                std::uint8_t compressed[data_max_size];
 
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                packet::recv(fd, address_to_write, msg.size),
-                "Failed recv a page, frame = {}",
-                frame_id
-            );
+                if (this->use_compression) {
+                    address_to_write = compressed;
+                }
 
-            if (this->use_compression) {
-                const auto recv_size = LZ4_decompress_safe(reinterpret_cast<char*>(address_to_write), reinterpret_cast<char*>(base_address), msg.size, page_size);
                 tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                    recv_size == 0, "Failed to decompress page data"
+                    packet::recv(fd, address_to_write, msg.size),
+                    "Failed recv a page, frame = {}",
+                    frame_id
                 );
+
+
+                if (this->use_compression) {
+                    const auto recv_size = LZ4_decompress_safe(reinterpret_cast<char*>(address_to_write), reinterpret_cast<char*>(base_address), msg.size, page_size);
+                    tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
+                        recv_size == 0, "Failed to decompress page data"
+                    );
+                }
             }
 
-            this->faultfd.write_protect(base_address, page_size);
-            this->set_frame_state_shared(frame_id);
-            this->faultfd.wake(base_address, page_size);
+            this->read_fencing_set[frame_id].emplace(peer_id);
+
+            if (this->read_fencing_set[frame_id].size() == this->peers.size()) {
+                this->out_standing_read[frame_id] = false;
+                this->set_frame_state_shared(frame_id);
+                this->faultfd.write_protect(base_address, page_size);
+                this->faultfd.wake(base_address, page_size);
+            }
         } else {
             spdlog::warn("Frame {} is received twice, discarding", frame_id);
 
@@ -329,6 +365,7 @@ class swapper : public peer_node {
                 frame_id
             );
         }
+
         return false;
     }
 
@@ -345,9 +382,18 @@ class swapper : public peer_node {
         const auto& addr_str = peer.value()->addr_str;
         const auto port      = peer.value()->port;
 
-        std::scoped_lock<std::mutex> lk{this->fencing_mutex[frame_id]};
+        {
+            std::scoped_lock<std::mutex> lk{this->read_fencing_mutex[frame_id]};
+            if (this->out_standing_read[frame_id]) {
+                // Oh oh, we are competing with some other peers, we are read, they are writing
+                // Read have priority, ignore the request
+                return false;
+            }
+        }
 
-        if (this->out_standing_writes[frame_id] && peer_id > this->my_id) {
+        std::scoped_lock<std::mutex> lk{this->write_fencing_mutex[frame_id]};
+
+        if (this->out_standing_write[frame_id] && peer_id > this->my_id) {
             // Oh oh, we are competing with some other peers
             // We have priority, ignore the request, tell them WE OWN THE PAGE!!
             tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
@@ -367,11 +413,11 @@ class swapper : public peer_node {
                 addr_str, port, peer_id
             );
 
-            if (this->out_standing_writes[frame_id]) {
+            if (this->out_standing_write[frame_id]) {
                 // Oh oh, we are competing with some other peers
                 // Allow peers with smaller id to proceed first to prevent starvation
                 // Revert the page state to modified, and restart from there
-                this->out_standing_writes[frame_id] = false;
+                this->out_standing_write[frame_id] = false;
                 this->faultfd.wake(base_address, page_size);
             }
         }
@@ -388,14 +434,14 @@ class swapper : public peer_node {
         const auto peer_id   = peer.value()->id;
         const auto frame_id  = msg.frame_id;
 
-        std::scoped_lock<std::mutex> lk{this->fencing_mutex[frame_id]};
-        this->fencing_set[frame_id].emplace(peer_id);
+        std::scoped_lock<std::mutex> lk{this->write_fencing_mutex[frame_id]};
+        this->write_fencing_set[frame_id].emplace(peer_id);
 
-        if (this->fencing_set[frame_id].size() == this->peers.size()) {
+        if (this->write_fencing_set[frame_id].size() == this->peers.size()) {
             const auto base_address = get_frame_address(msg.frame_id);
             this->faultfd.write_unprotect(base_address, page_size);
 
-            this->out_standing_writes[frame_id] = false;
+            this->out_standing_write[frame_id] = false;
             this->set_frame_state_owned(msg.frame_id, std::memory_order_release);
 
             this->faultfd.wake(base_address, page_size);
@@ -510,14 +556,17 @@ class swapper : public peer_node {
             ::read(this->timeout_timer_fd.get(), &expire_count, sizeof(expire_count));
 
             for (std::size_t frame_id = 0; frame_id < n_pages; ++frame_id) {
-                if (this->out_standing_reads[frame_id].load(std::memory_order_acquire)) {
-                    spdlog::debug("Timeout, asking frame {} again", frame_id);
-                    this->peers.broadcast(packet::ask_page_packet{ .frame_id = frame_id });
+                {
+                    std::scoped_lock<std::mutex> lk{this->read_fencing_mutex[frame_id]};
+                    if (this->out_standing_read[frame_id] == true) {
+                        spdlog::debug("Timeout, asking frame {} again", frame_id);
+                        this->peers.broadcast(packet::ask_page_packet{ .frame_id = frame_id });
+                    }
                 }
 
                 {
-                    std::scoped_lock<std::mutex> lk{this->fencing_mutex[frame_id]};
-                    if (this->out_standing_writes[frame_id] == true) {
+                    std::scoped_lock<std::mutex> lk{this->write_fencing_mutex[frame_id]};
+                    if (this->out_standing_write[frame_id] == true) {
                         spdlog::debug("Timeout, taking ownership of frame {} again", frame_id);
                         this->peers.broadcast(packet::my_page_packet{ .frame_id = frame_id });
                     }
