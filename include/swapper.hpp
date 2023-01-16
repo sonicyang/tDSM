@@ -127,9 +127,9 @@ class swapper : public peer_node {
 
         // The starting point, all pages are zero and shared between hosts
         if (this->is_master) {
-            std::fill_n(this->states, n_pages, state::OWNED);
+            std::fill_n(this->states, n_pages, state::exclusive);
         } else {
-            std::fill_n(this->states, n_pages, state::MODIFIED);
+            std::fill_n(this->states, n_pages, state::invalid);
             this->faultfd.write_protect(rdma_memory, rdma_size);
 
             // Remove mapping, for now
@@ -165,23 +165,11 @@ class swapper : public peer_node {
     const sys::file_descriptor backing_memory_fd;
     sys::user_fault_fd faultfd{};
 
-    enum class state {
-        SHARED,
-        MODIFIED,
-        OWNED
-    };
-
-    static auto inline state_to_string(const state s) {
-        if (s == state::MODIFIED) {
-            return "MODIFIED";
-        } else if (s == state::SHARED) {
-            return "SHARED";
-        } else if (s == state::OWNED) {
-            return "OWNED";
-        } else {
-            return "UNKNOWN";
-        }
-    }
+    tDSM_BETTER_ENUM(state, int,
+        shared,
+        invalid,
+        exclusive
+    );
 
     std::atomic<state> states[n_pages]{};
 
@@ -238,20 +226,20 @@ class swapper : public peer_node {
 
     auto inline set_frame_state_modified(const std::size_t frame_id, const std::memory_order order = std::memory_order_seq_cst) {
         // Wait for the local thread to finish writing
-        spdlog::debug("Set frame {} state as MODIFIED", frame_id);
-        states[frame_id].store(state::MODIFIED, order);
+        spdlog::debug("Set frame {} state as invalid", frame_id);
+        states[frame_id].store(state::invalid, order);
     }
 
     auto inline set_frame_state_shared(const std::size_t frame_id, const std::memory_order order = std::memory_order_seq_cst) {
         // Wait for the local thread to finish writing
-        spdlog::debug("Set frame {} state as SHARED", frame_id);
-        states[frame_id].store(state::SHARED, order);
+        spdlog::debug("Set frame {} state as shared", frame_id);
+        states[frame_id].store(state::shared, order);
     }
 
     auto inline set_frame_state_owned(const std::size_t frame_id, const std::memory_order order = std::memory_order_seq_cst) {
         // Wait for the local thread to finish writing
-        spdlog::debug("Set frame {} state as OWNED", frame_id);
-        states[frame_id].store(state::OWNED, order);
+        spdlog::debug("Set frame {} state as exclusive", frame_id);
+        states[frame_id].store(state::exclusive, order);
     }
 
     bool handle_ask_page(const sys::file_descriptor& fd, const packet::ask_page_packet& msg) final {
@@ -267,7 +255,7 @@ class swapper : public peer_node {
         const auto frame_id = msg.frame_id;
         const auto base_address = get_frame_address(frame_id);
         const auto current_state = this->states[frame_id].load(std::memory_order_acquire);
-        if (current_state == state::OWNED) {
+        if (current_state == state::exclusive) {
             // no longer exclusive
             this->set_frame_state_shared(frame_id);
             this->faultfd.write_protect(base_address, page_size);
@@ -504,7 +492,7 @@ class swapper : public peer_node {
                     this->set_frame_state_modified(frame_id);
                 }
 
-                if (current_state == state::MODIFIED) {
+                if (current_state == state::invalid) {
                     // If the page is dirty or not populated, first get it from owner, and make it write protected
 
                     if (fault.is_missing) {  // UFFD require us to zero or copy into a missing page
@@ -515,8 +503,8 @@ class swapper : public peer_node {
 
                     this->ask_page(frame_id);  // Download the data from the owner, can timeout or fail during owner ship transition
                     // continue after we receive a SEND_PAGE packet
-                } else if (current_state == state::SHARED) {
-                    tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(!fault.is_write, "A SHARED page trigger a fault, which is not a write");
+                } else if (current_state == state::shared) {
+                    tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(!fault.is_write, "A shared page trigger a fault, which is not a write");
                     // Take ownership
                     this->own_page(frame_id);
 
@@ -524,8 +512,8 @@ class swapper : public peer_node {
                         this->faultfd.continue_(base_address, page_size);
                     }
                     // continue with YOUR_PAGE response handling
-                } else if (current_state == state::OWNED) {
-                    tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(true, "A OWNED page trigger a fault");
+                } else if (current_state == state::exclusive) {
+                    tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(true, "A exclusive page trigger a fault");
                 }
             }
         }
