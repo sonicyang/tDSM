@@ -1,3 +1,15 @@
 [submodule "3rdparty/lz4"]
 	path = 3rdparty/lz4
 	url = https://github.com/lz4/lz4.git
+[submodule "3rdparty/cppzmq"]
+	path = 3rdparty/cppzmq
+	url = https://github.com/zeromq/cppzmq.git
+[submodule "3rdparty/libzmq"]
+	path = 3rdparty/libzmq
+	url = https://github.com/zeromq/libzmq.git
+[submodule "3rdparty/spdlog"]
+	path = 3rdparty/spdlog
+	url = https://github.com/gabime/spdlog.git
+[submodule "3rdparty/abseil-cpp"]
+	path = 3rdparty/abseil-cpp
+	url = https://github.com/abseil/abseil-cpp.git
