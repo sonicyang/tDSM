@@ -538,7 +538,7 @@ class message_t
             throw error_t();
         memcpy(data(), data_, size_);
     }
-    
+
     void rebuild(const std::string &str)
     {
         rebuild(str.data(), str.size());
@@ -2642,9 +2642,30 @@ template<typename T = no_user_data> class poller_t
         add_impl(socket, events, nullptr);
     }
 
+    template<
+      typename Dummy = void,
+      typename =
+        typename std::enable_if<!std::is_same<T, no_user_data>::value, Dummy>::type>
+    void add_fd(const int fd, event_flags events, T *user_data)
+    {
+        add_impl(fd, events, user_data);
+    }
+
+    void add_fd(const int fd, event_flags events)
+    {
+        add_impl(fd, events, nullptr);
+    }
+
     void remove(zmq::socket_ref socket)
     {
         if (0 != zmq_poller_remove(poller_ptr.get(), socket.handle())) {
+            throw error_t();
+        }
+    }
+
+    void remove_fd(const int fd)
+    {
+        if (0 != zmq_poller_remove_fd(poller_ptr.get(), fd)) {
             throw error_t();
         }
     }
@@ -2653,6 +2674,15 @@ template<typename T = no_user_data> class poller_t
     {
         if (0
             != zmq_poller_modify(poller_ptr.get(), socket.handle(),
+                                 static_cast<short>(events))) {
+            throw error_t();
+        }
+    }
+
+    void modify_fd(const int fd, event_flags events)
+    {
+        if (0
+            != zmq_poller_modify_fd(poller_ptr.get(), fd,
                                  static_cast<short>(events))) {
             throw error_t();
         }
@@ -2704,6 +2734,15 @@ template<typename T = no_user_data> class poller_t
     {
         if (0
             != zmq_poller_add(poller_ptr.get(), socket.handle(), user_data,
+                              static_cast<short>(events))) {
+            throw error_t();
+        }
+    }
+
+    void add_impl(const int fd, event_flags events, T *user_data)
+    {
+        if (0
+            != zmq_poller_add(fd, socket.handle(), user_data,
                               static_cast<short>(events))) {
             throw error_t();
         }
