@@ -21,6 +21,7 @@ option(CPPZMQ_BUILD_TESTS "" OFF)
 add_subdirectory(3rdparty/libzmq)
 add_subdirectory(3rdparty/cppzmq)
 add_subdirectory(3rdparty/lz4/build/cmake)
+add_subdirectory(3rdparty/fmt)
 add_subdirectory(3rdparty/spdlog)
 add_subdirectory(3rdparty/abseil-cpp)
 
@@ -30,6 +31,7 @@ function(add_rdma_executable NAME)
     target_include_directories(${NAME} PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
     target_link_libraries(${NAME} PRIVATE 
+        fmt
         spdlog::spdlog
         absl::flags
         absl::flags_parse
