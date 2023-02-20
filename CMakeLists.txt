@@ -16,6 +16,8 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_CXX_STANDARD 20)
 
 set(ZMQ_BUILD_TESTS OFF)
+set(ENABLE_DRAFTS ON)
+option(ENABLE_DRAFTS ON)
 option(CPPZMQ_BUILD_TESTS "" OFF)
 
 add_subdirectory(3rdparty/libzmq)
@@ -24,6 +26,8 @@ add_subdirectory(3rdparty/lz4/build/cmake)
 add_subdirectory(3rdparty/fmt)
 add_subdirectory(3rdparty/spdlog)
 add_subdirectory(3rdparty/abseil-cpp)
+
+add_compile_definitions(ZMQ_BUILD_DRAFT_API)
 
 function(add_rdma_executable NAME)
     add_executable(${NAME} ${ARGN})
@@ -37,6 +41,7 @@ function(add_rdma_executable NAME)
         absl::flags_parse
         absl::flags_usage
         lz4_static
+        cppzmq
     )
     target_link_options(${NAME} PRIVATE "-no-pie")
 
