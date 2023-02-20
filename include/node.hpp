@@ -13,15 +13,10 @@
 
 #pragma once
 
-#include <arpa/inet.h>
-#include <poll.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -33,8 +28,11 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
-#include <spdlog/spdlog.h>
+#include "fmt/core.h"
+#include "spdlog/spdlog.h"
+#include "zmq.hpp"
 
 #include "configs.hpp"
 #include "packet.hpp"
@@ -45,235 +43,141 @@
 
 namespace tDSM {
 
-static inline constexpr auto master_port = 9634;
-extern bool use_compression;
+static inline constexpr auto directory_rpc_port = 9634;
+static inline constexpr auto directory_pub_port = directory_rpc_port + 1;
+
+using id_t = std::size_t;
+using frame_id_t = std::size_t;
+
+class Context {
+ public:
+    static inline Context& get() {
+        static Context instance;
+        return instance;
+    }
+
+    virtual ~Context() {}
+
+    zmq::context_t zmq_ctx;
+ private:
+     Context() {}
+};
 
 class Node {
  public:
-    Node(const std::uint16_t port) : listener_fd(socket(AF_INET, SOCK_STREAM, 0)) {
-        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
-            listener_fd.get() < 0,
-            "Failed to create the listener fd"
-        );
-
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-        addr.sin_addr.s_addr = INADDR_ANY;
-        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-            bind(listener_fd.get(), reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)),
-            "Failed to bind to port: {}", port
-        );
-        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-            listen(this->listener_fd.get(), max_concurrent_connection),
-            "Failed to listen to socket: {}", listener_fd.get()
-        );
-        constexpr auto enabled = 1;
-        setsockopt(listener_fd.get(), SOL_SOCKET, SO_KEEPALIVE, &enabled, sizeof(enabled));
-        this->listener_thread = std::thread{[this]() {
-            this->listener();
-        }};
-    }
+    Node() {}
 
     virtual ~Node() {}
 
     Node(const Node&) = delete;
     Node& operator=(const Node&) = delete;
 
+    bool use_compression = false;
+
  protected:
-    static constexpr auto max_concurrent_connection = 16;
+    static constexpr auto has_error = true;
+    static constexpr auto OK = false;
 
-    bool use_compression = tDSM::use_compression;
+    inline void handle(zmq::socket_ref sock, utils::cancelable_thread& this_thread) {
+        zmq::poller_t<> poller;
+        poller.add(sock, zmq::event_flags::pollin);
+        poller.add_fd(this_thread.evtfd.get(), zmq::event_flags::pollin);
 
-    // The listener thread
-    sys::file_descriptor listener_fd;
-    utils::cancelable_thread listener_thread{};
-
-    static inline auto addr_to_string(const struct in_addr& addr) {
-        auto addr_str = std::string(INET_ADDRSTRLEN, ' ');
-        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-            !inet_ntop(AF_INET, &addr, addr_str.data(), INET_ADDRSTRLEN),
-            "Failed convert a inet addr to string"
-        );
-
-        auto it = std::find_if(addr_str.rbegin(), addr_str.rend(),
-            [](char c) {
-                return !std::isspace<char>(c, std::locale::classic());
-            });
-        addr_str.erase(it.base(), addr_str.end());
-        return addr_str;
-    }
-
-    virtual void listener() = 0;
-
-    inline void handler(const std::string& addr_str, const std::uint16_t port, sys::file_descriptor& fd, utils::cancelable_thread& this_thread) {
-        const auto epollfd = sys::epoll(fd, this_thread.evtfd);
         while (!this_thread.stopped.load(std::memory_order_acquire)) {
             // Wait for event
-            const auto [count, events] = epollfd.wait();
-            if ((count <= 0) || !epollfd.check_fd_in_result(events, fd)) {
+            std::vector<zmq::poller_event<>> events(poller.size());
+            const auto count = poller.wait_all(events, std::chrono::milliseconds{0});
+
+            if (count <= 0) {
                 continue;
             }
 
-            const auto type = packet::peek_packet_type(fd);
-            if (!type.has_value()) {
-                spdlog::error("Connection to peer {}:{} ended unexpectedly!", addr_str, port);
-                this_thread.stopped.store(true, std::memory_order_relaxed);
-                continue;
-            }
+            for (auto& event : events) {
+                if (event.socket == nullptr) {
+                    continue;
+                }
 
-            if (this->handle_a_packet(type.value(), addr_str, port, fd)) {
-                this_thread.stopped.store(true, std::memory_order_relaxed);
+                zmq::message_t message;
+                const auto nbyte = event.socket.recv(message, zmq::recv_flags::none);
+                if (nbyte < sizeof(packet::packet_header) || this->handle_a_packet(event.socket, message)) {
+                    this_thread.stopped.store(true, std::memory_order_relaxed);
+                    break;
+                }
             }
         }
-        if (fd.get() >= 0) {
-            // Tell the remote we are disconnecting
-            packet::send(fd, packet::disconnect_packet{});
-        }
-        spdlog::info("Connection to peer {}:{} ended!", addr_str, port);
-        fd.release();
+
+        // Don't care even this failed
+        (void)sock.send(packet::disconnect_packet{}, zmq::send_flags::dontwait);
+
+        poller.remove(sock);
+        poller.remove_fd(this_thread.evtfd.get());
     }
 
     template<typename T>
-    inline auto forward_packet(const sys::file_descriptor& fd, const auto& func) {
-        const auto msg = packet::recv<T>(fd);
-        if (!msg.has_value()) {
-            return true;
-        }
-        return func(this, fd, msg.value());
+    inline auto forward_packet(zmq::socket_ref sock, const zmq::message_t& message, const auto& func) {
+        const auto packet = message.data<T>();
+        return (this->*func)(sock, *packet);
     }
 
-    inline bool handle_a_packet(const packet::packet_type& type, const std::string& addr_str, const std::uint16_t port, const sys::file_descriptor& fd) {
+    inline bool handle_a_packet(zmq::socket_ref sock, const zmq::message_t& message) {
         bool err = false;
         bool ret = false;
 
-        spdlog::debug("Handling packet: {} from {}:{}", packet::packet_type_to_string(type), addr_str, port);
+        const auto packet = message.data<packet::packet_header>();
+        const auto type = packet->type;
+
+        spdlog::debug("Handling packet: {}", packet::packet_type_to_string(type));
+
+#define HANDLE(X) case packet::packet_type::X: err = forward_packet<packet::X##_packet>(sock, message, &Node::handle_##X); break
 
         switch (type) {
             case packet::packet_type::disconnect:
                 // No need to recv, socket is close by remote
-                spdlog::info("Peer {}:{} disconnected!", addr_str, port);
+                spdlog::info("Peer disconnected!");
+                (void)forward_packet<packet::disconnect_packet>(sock, message, &Node::handle_disconnect);
                 ret = true;
                 break;
-            case packet::packet_type::ping:
-                err = forward_packet<packet::ping_packet>(fd, std::mem_fn(&Node::handle_ping));
-                break;
-            case packet::packet_type::pong:
-                err = forward_packet<packet::pong_packet>(fd, std::mem_fn(&Node::handle_pong));
-                break;
-            case packet::packet_type::ack:
-                err = forward_packet<packet::ack_packet>(fd, std::mem_fn(&Node::handle_ack));
-                break;
-            case packet::packet_type::ask_port:
-                err = forward_packet<packet::ask_port_packet>(fd, std::mem_fn(&Node::handle_ask_port));
-                break;
-            case packet::packet_type::report_port:
-                err = forward_packet<packet::report_port_packet>(fd, std::mem_fn(&Node::handle_report_port));
-                break;
-            case packet::packet_type::register_peer:
-                err = forward_packet<packet::register_peer_packet>(fd, std::mem_fn(&Node::handle_register_peer));
-                break;
-            case packet::packet_type::unregister_peer:
-                err = forward_packet<packet::unregister_peer_packet>(fd, std::mem_fn(&Node::handle_unregister_peer));
-                break;
-            case packet::packet_type::my_id:
-                err = forward_packet<packet::my_id_packet>(fd, std::mem_fn(&Node::handle_my_id));
-                break;
-            case packet::packet_type::ask_page:
-                err = forward_packet<packet::ask_page_packet>(fd, std::mem_fn(&Node::handle_ask_page));
-                break;
-            case packet::packet_type::send_page:
-                err = forward_packet<packet::send_page_packet>(fd, std::mem_fn(&Node::handle_send_page));
-                break;
-            case packet::packet_type::my_page:
-                err = forward_packet<packet::my_page_packet>(fd, std::mem_fn(&Node::handle_my_page));
-                break;
-            case packet::packet_type::your_page:
-                err = forward_packet<packet::your_page_packet>(fd, std::mem_fn(&Node::handle_your_page));
-                break;
-            case packet::packet_type::sem_get:
-                err = forward_packet<packet::sem_get_packet>(fd, std::mem_fn(&Node::handle_sem_get));
-                break;
-            case packet::packet_type::sem_put:
-                err = forward_packet<packet::sem_put_packet>(fd, std::mem_fn(&Node::handle_sem_put));
-                break;
+            HANDLE(connect);
+            HANDLE(configure);
+            HANDLE(register_peer);
+            HANDLE(unregister_peer);
+            HANDLE(my_id);
+            HANDLE(ask_page);
+            HANDLE(send_page);
+            HANDLE(my_page);
+            HANDLE(your_page);
+            HANDLE(sem_get);
+            HANDLE(sem_put);
         }
 
+#undef HANDLE
+
         if (err) {
-            spdlog::error("Reading packet type {} from peer {} cause an error!", packet::packet_type_to_string(type), addr_str);
+            spdlog::error("Reading packet type {} cause an error!", packet::packet_type_to_string(type));
         }
         return ret;
     }
 
-    bool handle_ping(const sys::file_descriptor& fd, const packet::ping_packet& msg) {
-        spdlog::trace("ping!");
-        return packet::send(fd, packet::pong_packet{ .magic = msg.magic });
+#define HANDLER(X) \
+    virtual bool handle_##X(zmq::socket_ref, const packet::X##_packet&) { \
+        spdlog::warn("Ignoring a X packet"); \
+        return OK; \
     }
 
-    bool handle_pong(const sys::file_descriptor&, const packet::pong_packet&) {
-        spdlog::trace("pong!");
-        return false;
-    }
+    HANDLER(disconnect)
+    HANDLER(connect)
+    HANDLER(configure)
+    HANDLER(register_peer)
+    HANDLER(unregister_peer)
+    HANDLER(my_id)
+    HANDLER(ask_page)
+    HANDLER(send_page)
+    HANDLER(my_page)
+    HANDLER(your_page)
+    HANDLER(sem_get)
+    HANDLER(sem_put)
 
-    bool handle_ack(const sys::file_descriptor&, const packet::ack_packet&) {
-        spdlog::trace("Got ack!");
-        return false;
-    }
-
-    virtual bool handle_ask_port(const sys::file_descriptor&, const packet::ask_port_packet&) {
-        spdlog::warn("Ignoring a ask_port packet");
-        return false;
-    }
-
-    virtual bool handle_report_port(const sys::file_descriptor&, const packet::report_port_packet&) {
-        spdlog::warn("Ignoring a report_port packet");
-        return false;
-    }
-
-    virtual bool handle_register_peer(const sys::file_descriptor&, const packet::register_peer_packet&) {
-        spdlog::warn("Ignoring a register_peer packet");
-        return false;
-    }
-
-    virtual bool handle_unregister_peer(const sys::file_descriptor&, const packet::unregister_peer_packet&) {
-        spdlog::warn("Ignoring a unregister_peer packet");
-        return false;
-    }
-
-    virtual bool handle_my_id(const sys::file_descriptor&, const packet::my_id_packet&) {
-        spdlog::warn("Ignoring a my_id packet");
-        return false;
-    }
-
-    virtual bool handle_ask_page(const sys::file_descriptor&, const packet::ask_page_packet&) {
-        spdlog::warn("Ignoring a ask_page packet");
-        return false;
-    }
-
-    virtual bool handle_send_page(const sys::file_descriptor&, const packet::send_page_packet&) {
-        spdlog::warn("Ignoring a send_page packet");
-        return false;
-    }
-
-    virtual bool handle_my_page(const sys::file_descriptor&, const packet::my_page_packet&) {
-        spdlog::warn("Ignoring a my_page packet");
-        return false;
-    }
-
-    virtual bool handle_your_page(const sys::file_descriptor&, const packet::your_page_packet&) {
-        spdlog::warn("Ignoring a your_page packet");
-        return false;
-    }
-
-    virtual bool handle_sem_get(const sys::file_descriptor&, const packet::sem_get_packet&) {
-        spdlog::warn("Ignoring a sem get packet");
-        return false;
-    }
-
-    virtual bool handle_sem_put(const sys::file_descriptor&, const packet::sem_put_packet&) {
-        spdlog::warn("Ignoring a sem put packet");
-        return false;
-    }
+#undef HANDLER
 };
 
 class master_node : public Node {
@@ -283,8 +187,23 @@ class master_node : public Node {
         return instance;
     }
 
+    inline auto initialize(const bool use_compression_) {
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(initialized, "Cannot initialize twice");
+
+        this->use_compression = use_compression_;
+
+        initialized = true;
+    }
+
  private:
-    master_node() : Node(master_port) {}
+    master_node() {
+        const auto local_pub_uri = fmt::format("tcp://*:{}", directory_pub_port);
+        pub_endpoint.bind(local_pub_uri);
+
+        const auto local_rpc_uri = fmt::format("tcp://*:{}", directory_rpc_port);
+        rpc_endpoint.bind(local_rpc_uri);
+        this->rpc_thread = std::thread([this] { this->handle(this->rpc_endpoint, this->rpc_thread); });
+    }
     ~master_node() override {}
 
     master_node(const master_node&) = delete;
@@ -292,111 +211,69 @@ class master_node : public Node {
     master_node(master_node&&) = delete;
     master_node& operator=(master_node&&) = delete;
 
-    // The clients for master
-    struct peer {
-        std::size_t id;
-        std::string addr_str;
-        struct in_addr addr;
-        std::uint16_t port;
-        sys::file_descriptor fd;
-        utils::cancelable_thread thread{};
-        peer(
-            const std::size_t id_,
-            const std::string& addr_str_,
-            const struct in_addr& addr_,
-            const std::uint16_t port_,
-            sys::file_descriptor&& fd_) : id(id_), addr_str(addr_str_), addr(addr_), port(port_), fd(std::move(fd_)) {}
-    };
-    std::atomic_uint64_t number_of_peers{0};
-    std::map<int, std::unique_ptr<peer>> peers{};
-    mutable std::mutex peers_mutex{};
+    bool initialized = false;
 
-    inline decltype(auto) add_peer(const std::uint64_t peer_id, const std::string& addr_str, const struct in_addr& addr, const std::uint16_t port, sys::file_descriptor&& fd) {
-        std::scoped_lock<std::mutex> lk{this->peers_mutex};
-        // Add to the list of clients/peers
-        const auto fd_value = fd.get();
-        auto& ref = peers.emplace(fd_value, std::make_unique<peer>(
-            peer_id,
-            addr_str,
-            addr,
-            port,
-            std::move(fd)
-        )).first->second;
-        return ref;
+    zmq::socket_t pub_endpoint = zmq::socket_t(Context::get().zmq_ctx, zmq::socket_type::pub);
+    zmq::socket_t rpc_endpoint = zmq::socket_t(Context::get().zmq_ctx, zmq::socket_type::rep);
+    utils::cancelable_thread rpc_thread{};
+
+    std::atomic_size_t number_of_peers{1};  // Number 0 is reserved as id not set.
+    struct peer {
+        std::string addr;
+        std::uint16_t port;
+    };
+    mutable std::mutex peers_mutex{};
+    std::unordered_map<id_t, peer> peers{};
+
+    bool handle_disconnect(zmq::socket_ref, const packet::disconnect_packet& msg) final {
+        std::scoped_lock<std::mutex> lk(this->peers_mutex);
+
+        const auto peer_id = msg.hdr.from;
+        peers.erase(peer_id);
+        return OK;
     }
 
-    void listener() override {
-        const auto epollfd = sys::epoll(this->listener_fd, this->listener_thread.evtfd);
-        while (!this->listener_thread.stopped.load(std::memory_order_acquire)) {
-            spdlog::trace("Master waiting for peers to connect");
+    bool handle_connect(zmq::socket_ref, const packet::connect_packet& msg) final {
+        const auto peer_id = number_of_peers.fetch_add(1);
+        spdlog::trace("Accepting new peer : ID: {}", peer_id);
 
-            // Wait for event
-            const auto [count, events] = epollfd.wait();
-            if ((count <= 0) || !epollfd.check_fd_in_result(events, this->listener_fd)) {
-                continue;
-            }
+        // One at a time, no race
+        const auto nbytes = this->rpc_endpoint.send(packet::configure_packet{ .peer_id = peer_id, .use_compression = use_compression }, zmq::send_flags::dontwait);
+        if (nbytes != sizeof(packet::configure_packet)) {
+            return has_error;
+        }
 
-            struct sockaddr_in incomming_peer{};
-            socklen_t incomming_peer_size = sizeof(incomming_peer);
-            auto client_fd = sys::file_descriptor{::accept(this->listener_fd.get(), reinterpret_cast<struct sockaddr*>(&incomming_peer), &incomming_peer_size)};
-            tDSM_SPDLOG_DUMP_IF_ERROR_WITH_ERRNO(client_fd.get() < 0, "Failed to accept a connection") {
-                continue;
-            }
-            constexpr auto enabled = 1;
-            setsockopt(client_fd.get(), SOL_SOCKET, SO_KEEPALIVE, &enabled, sizeof(enabled));
+        {
+            std::scoped_lock<std::mutex> lk(this->peers_mutex);
+            for (const auto& [id, peer] : this->peers) {
+                while (true) {
+                    packet::register_peer_packet pkt;
+                    pkt.peer_id = id;
+                    std::copy_n(peer.addr.c_str(), sizeof(pkt.addr), pkt.addr);
+                    pkt.port = peer.port;
 
-            const auto addr_str = addr_to_string(incomming_peer.sin_addr);
-            const auto peer_id = number_of_peers.fetch_add(1);
-            spdlog::trace("Accepting new peer : {}, ID: {}", addr_str, peer_id);
-
-            // Get port
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                packet::send(client_fd, packet::ask_port_packet{ .peer_id = peer_id, .use_compression = this->use_compression }),
-                "Failed send a ask_port packet to peer {}, ID {}",
-                addr_str, peer_id
-            );
-            const auto response = packet::recv<packet::report_port_packet>(client_fd);
-
-            if (!response.has_value()) {
-                spdlog::error("Failed to acquire the port of : {}", addr_str);
-                (void)packet::send(client_fd, packet::disconnect_packet{});
-                continue;
-            }
-
-            spdlog::trace("New peer {} at {}:{} connected!", peer_id, addr_str, response.value().port);
-
-            {
-                std::scoped_lock<std::mutex> lk{this->peers_mutex};
-                for (const auto& [id, other_peer] : this->peers) {
-                    if (!other_peer->thread.stopped.load(std::memory_order_acquire)) {
-                        if(packet::send(other_peer->fd, packet::register_peer_packet{
-                            .peer_id = peer_id,
-                            .addr = incomming_peer.sin_addr.s_addr,
-                            .port = response.value().port,
-                        })) {
-                            spdlog::error("Failed to notify peer {}@{}:{} to register {}@{}:{}",
-                                id, other_peer->addr_str, other_peer->port,
-                                peer_id, addr_str, response.value().port);
-                        }
+                    const auto nbytes = this->pub_endpoint.send(pkt, zmq::send_flags::dontwait);
+                    if (nbytes == sizeof(pkt)) {
+                        break;
                     }
                 }
             }
 
-            auto& ref = this->add_peer(
-                peer_id,
-                addr_str,
-                incomming_peer.sin_addr,
-                response.value().port,
-                std::move(client_fd));
-
-            // Start the thread to handle the communication between master and client
-            ref->thread = std::thread{[this, &ref]() {
-                this->handler(ref->addr_str, ref->port, ref->fd, ref->thread);
-            }};
+            peer p;
+            this->peers.emplace(peer_id, peer{msg.addr, msg.port});
         }
+
+        packet::register_peer_packet pkt;
+        pkt.peer_id = peer_id;
+        std::copy_n(msg.addr, sizeof(pkt.addr), pkt.addr);
+        pkt.port = msg.port;
+        this->pub_endpoint.send(pkt, zmq::send_flags::dontwait);
+
+        return OK;
     }
 
     // semaphore list
+#if 0
     mutable std::mutex sem_queue_mutex{};
     struct sem_state {
         std::size_t count{};
@@ -453,212 +330,186 @@ class master_node : public Node {
 
         return false;
     }
+#endif
 };
 
 class peer_node : public Node {
- protected:
-    class peers {
-         public:
-            template<typename... Ts>
-            auto inline add(sys::file_descriptor&& fd, Ts&&... ts) {
-                std::scoped_lock<std::mutex> lk{this->mutex};
-                this->epollfd.add_fd(fd);
-                const auto fd_value = fd.get();
-                this->peers.emplace(fd_value, peer{std::move(fd), std::forward<Ts>(ts)...});
-            }
-
-            auto inline del(sys::file_descriptor& fd) {
-                std::scoped_lock<std::mutex> lk{this->mutex};
-                if (fd.get() >= 0) {
-                    packet::send(fd, packet::disconnect_packet{});
-                }
-                this->epollfd.delete_fd(fd);
-                this->peers.erase(fd.get());
-                fd.release();
-            }
-
-            auto inline clear() {
-                std::scoped_lock<std::mutex> lk{this->mutex};
-                for (auto& [fd, peer] : this->peers) {
-                    if (peer.fd.get() >= 0) {
-                        packet::send(peer.fd, packet::disconnect_packet{});
-                    }
-                    this->epollfd.delete_fd(peer.fd);
-                }
-                this->peers.clear();
-            }
-
-            const sys::epoll& get_epoll_fd() const {
-                return this->epollfd;
-            }
-
-            struct peer {
-                sys::file_descriptor fd;
-                std::uint64_t id;
-                std::string addr_str;
-                std::uint16_t port;
-                peer(sys::file_descriptor&& fd_, const std::uint64_t id_, const std::string& addr_str_, const std::uint16_t port_)
-                    : fd(std::move(fd_)), id(id_), addr_str(addr_str_), port(port_) {}
-            };
-            std::unordered_map<int, peer> peers{};
-            sys::epoll epollfd{};
-            mutable std::mutex mutex{};
-
-            std::optional<peer*> operator[](const int fd_to_find) {
-                std::scoped_lock<std::mutex> lk{this->mutex};
-                if (this->peers.contains(fd_to_find)) {
-                    return {&this->peers.at(fd_to_find)};
-                } else {
-                    return {};
-                }
-            }
-
-            inline auto size() const {
-                return this->peers.size();
-            }
-
-            template<typename T>
-            auto inline broadcast(const T& packet) {
-                std::scoped_lock<std::mutex> lk(this->mutex);
-                for (const auto& [fd, peer] : this->peers) {
-                    tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                        packet::send(peer.fd, packet),
-                        "Cannot send packet, type = {}, during broadcast", packet.hdr.type);
-                }
-            }
-    };
-
-    peers peers{};
-    std::uint64_t my_id{};
-    const std::string master_ip;
-    const std::uint16_t my_port;
-
-    // master <-> client
-    sys::file_descriptor master_fd;
-    utils::cancelable_thread master_communication_thread{};
-
-    peer_node(const std::string master_ip_, const std::uint16_t my_port_) : Node(my_port_), master_ip(master_ip_), my_port(my_port_), master_fd(socket(AF_INET, SOCK_STREAM, 0)) {
-        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
-            master_fd.get() < 0,
-            "Failed to create the socket for master"
-        );
-
-        spdlog::info("Connecting to master {}:{}", master_ip, master_port);
-
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(master_port);
-        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-            !inet_aton(master_ip.c_str(), &addr.sin_addr),
-            "Failed convert {} to a inet address",
-            master_ip
-        );
-        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-            connect(master_fd.get(), reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)),
-            "Failed to connect to master at {}:{}",
-            master_ip, master_port
-        );
-        this->master_communication_thread = std::thread{[this]() {
-            this->handler(this->master_ip, master_port, this->master_fd, this->master_communication_thread);
-        }};
+ public:
+    static peer_node& get() {
+        static peer_node instance;
+        return instance;
     }
 
-    ~peer_node() override {}
+ protected:
+    peer_node() {}
+    ~peer_node() override {
+        if (initialized) {
+            {
+                const auto nbytes = this->directory_rpc_endpoint.send(packet::disconnect_packet{}, zmq::send_flags::dontwait);
+                tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::disconnect_packet), "Failed to disconnect from directory");
+            }
+            {
+                const auto nbytes = this->pub_endpoint.send(packet::disconnect_packet{}, zmq::send_flags::dontwait);
+                tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::disconnect_packet), "Failed to publish disconnect");
+            }
+        }
+    }
 
     peer_node(const peer_node&) = delete;
     peer_node& operator=(const peer_node&) = delete;
     peer_node(peer_node&&) = delete;
     peer_node& operator=(peer_node&&) = delete;
 
+    class peers {
+     public:
+        template<typename... Ts>
+        inline auto add(const id_t id, zmq::socket_t&& endpoint, Ts&&... ts) {
+            std::scoped_lock<std::mutex> lk{this->mutex};
+            poller.add(endpoint, zmq::event_flags::pollin);
+            this->peers.emplace(id, peer{std::move(endpoint), std::forward<Ts>(ts)...});
+        }
+
+        inline auto del(const id_t id) {
+            std::scoped_lock<std::mutex> lk{this->mutex};
+            poller.remove(this->peers[id].endpoint);
+            this->peers.erase(id);
+        }
+
+        inline auto clear() {
+            std::scoped_lock<std::mutex> lk{this->mutex};
+            for (auto& [id, peer] : this->peers) {
+                poller.remove(peer.endpoint);
+            }
+            this->peers.clear();
+        }
+
+        inline auto& get_poller() {
+            return this->poller;
+        }
+
+        inline auto& get_peers() {
+            return this->peers;
+        }
+
+        inline auto size() const {
+            return this->peers.size();
+        }
+
+        ~peers() {
+            this->clear();
+        }
+
+        struct peer {
+            zmq::socket_t endpoint;
+            std::string addr;
+            std::uint16_t port;
+        };
+
+     private:
+        mutable std::mutex mutex{};
+        std::unordered_map<id_t, peer> peers{};
+        zmq::poller_t<> poller;
+
+        //std::optional<peer*> operator[](const int fd_to_find) {
+            //std::scoped_lock<std::mutex> lk{this->mutex};
+            //if (this->peers.contains(fd_to_find)) {
+                //return {&this->peers.at(fd_to_find)};
+            //} else {
+                //return {};
+            //}
+        //}
+    };
+
+    peers peers{};
+    id_t my_id{};
+    std::string directory_addr;
+    std::string my_addr;
+    std::uint16_t my_port;
+    bool initialized = false;
+
+    zmq::socket_t pub_endpoint = zmq::socket_t(Context::get().zmq_ctx, zmq::socket_type::pub);
+
+    zmq::socket_t directory_sub_endpoint = zmq::socket_t(Context::get().zmq_ctx, zmq::socket_type::sub);
+    zmq::socket_t directory_rpc_endpoint = zmq::socket_t(Context::get().zmq_ctx, zmq::socket_type::req);
+    utils::cancelable_thread directory_sub_thread{};
+
+    inline auto initialize(const std::string& directory_addr_, const std::string& my_addr_, const std::uint16_t my_port_) {
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(initialized, "Cannot initialize twice");
+
+        this->directory_addr = directory_addr_;
+        this->my_addr = my_addr_;
+        this->my_port = my_port_;
+
+        const auto local_pub_uri = fmt::format("tcp://*:{}", my_port_);
+        pub_endpoint.bind(local_pub_uri);
+
+        spdlog::info("Connecting to directory {}:{}", directory_addr, directory_rpc_port);
+
+        const auto directory_sub_uri = fmt::format("tcp://{}:{}", directory_addr, directory_pub_port);
+        directory_sub_endpoint.connect(directory_sub_uri);
+        directory_sub_endpoint.set(zmq::sockopt::subscribe, "");  // filter nothing
+
+        const auto directory_rpc_uri = fmt::format("tcp://{}:{}", directory_addr, directory_rpc_port);
+        directory_rpc_endpoint.connect(directory_rpc_uri);
+
+        {
+            packet::connect_packet pkt;
+            std::strncpy(pkt.addr, this->my_addr.c_str(), sizeof(pkt.addr) - 1);
+            pkt.port = this->my_port;
+            const auto nbytes = this->directory_rpc_endpoint.send(pkt, zmq::send_flags::dontwait);
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(pkt), "Failed to connect to directory");
+        }
+        {
+            zmq::message_t message;
+            const auto nbytes = this->directory_rpc_endpoint.recv(message, zmq::recv_flags::none);
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::configure_packet), "Failed configuration");
+
+            const auto msg = message.data<packet::configure_packet>();
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(msg->hdr.type != packet::packet_type::configure, "Failed configuration, packet invalid");
+
+            this->my_id = msg->peer_id;
+            packet::my_id = this->my_id;
+            spdlog::trace("My ID is assigned as {}", this->my_id);
+
+            assert(tDSM::packet::my_id != 0);
+
+            use_compression = msg->use_compression;
+            if (use_compression) {
+                spdlog::trace("Compression enabled");
+            }
+        }
+
+        // Start the processing thread after configuration, otherwise will race before acquiring our ID and subscribe to ourself because of the bypass guard failing in handle_register_peer
+        this->directory_sub_thread = std::thread([this] { this->handle(this->directory_sub_endpoint, this->directory_sub_thread); });
+
+        initialized = true;
+    }
+
  private:
-    void listener() override {
-        const auto epollfd = sys::epoll(this->listener_fd, this->listener_thread.evtfd);
-        while (!this->listener_thread.stopped.load(std::memory_order_acquire)) {
-            spdlog::trace("Waiting for peers to connect");
-
-            // Wait for event
-            const auto [count, events] = epollfd.wait();
-            if ((count <= 0) || !epollfd.check_fd_in_result(events, this->listener_fd)) {
-                continue;
-            }
-
-            struct sockaddr_in incomming_peer{};
-            socklen_t incomming_peer_size = sizeof(incomming_peer);
-            auto peer_fd = sys::file_descriptor{::accept(this->listener_fd.get(), reinterpret_cast<struct sockaddr*>(&incomming_peer), &incomming_peer_size)};
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
-                peer_fd.get() < 0,
-                "Failed to accept a connection"
-            );
-            if (peer_fd.get() < 0) {
-                continue;
-            }
-            constexpr auto enabled = 1;
-            setsockopt(peer_fd.get(), SOL_SOCKET, SO_KEEPALIVE, &enabled, sizeof(enabled));
-
-            const auto addr_str = addr_to_string(incomming_peer.sin_addr);
-            spdlog::trace("Swapper accepting new peer : {}", addr_str);
-
-            // What is their ID?
-            const auto response = packet::recv<packet::my_id_packet>(peer_fd);
-            if (!response.has_value()) {
-                spdlog::error("Fail to receive peer ID : {}", addr_str);
-                continue;
-            }
-
-            // Add to the list of peers
-            const auto peer_id = response.value().peer_id;
-            const auto peer_port = ntohs(incomming_peer.sin_port);
-            this->peers.add(std::move(peer_fd), peer_id, addr_str, peer_port);
-
-            spdlog::info("Swapper register a peer {}:{}, ID: peer_id: {}", addr_str, peer_port, peer_id);
-        }
+    bool handle_disconnect(zmq::socket_ref, const packet::disconnect_packet& msg) final {
+        const auto peer_id = msg.hdr.from;
+        peers.del(peer_id);
+        return OK;
     }
 
-    bool handle_register_peer(const sys::file_descriptor& fd, const packet::register_peer_packet& msg) final {
-        if (msg.peer_id > my_id) {  // New peer connected into the federation, connect and make p2p channel
-            struct sockaddr_in peer_addr{};
-            peer_addr.sin_family = AF_INET;
-            peer_addr.sin_addr.s_addr = msg.addr;
-            peer_addr.sin_port = htons(msg.port);
-
-            auto peer_fd = sys::file_descriptor{socket(AF_INET, SOCK_STREAM, 0)};
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
-                peer_fd.get() < 0,
-                "Failed to create the socket for peer"
-            );
-
-            const auto addr_str = addr_to_string(peer_addr.sin_addr);
-            spdlog::trace("Registering and connecting to a new peer : {}:{}", addr_str, msg.port);
-
-            // Connect to the remote peer
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                connect(peer_fd.get(), reinterpret_cast<struct sockaddr*>(&peer_addr), sizeof(peer_addr)),
-                "Failed to connect to peer at {}:{}, ID: {}",
-                addr_str, msg.port, msg.peer_id
-            );
-
-            // Tell them our ID
-            if (packet::send(peer_fd, packet::my_id_packet{ .peer_id = my_id })) {
-                spdlog::error("Fail to transmit peer ID : {}", addr_str);
-                return true;
-            }
-
-            spdlog::trace("New peer {} at {}:{} connected!", msg.peer_id, addr_str, msg.port);
-
-            // Add to list of peers
-            this->peers.add(std::move(peer_fd), msg.peer_id, addr_str, msg.port);
-
-            spdlog::info("Register a peer {}:{}, ID: {}", addr_str, msg.port, msg.peer_id);
+    bool handle_register_peer(zmq::socket_ref, const packet::register_peer_packet& msg) final {
+        if (msg.peer_id == my_id || this->peers.get_peers().contains(msg.peer_id)) {  // no loop back, and duplication
+            return OK;
         }
-        return packet::send(fd, packet::ack_packet{});
-    }
 
-    bool handle_ask_port(const sys::file_descriptor& fd, const packet::ask_port_packet& msg) final {
-        this->my_id = msg.peer_id;
-        this->use_compression = msg.use_compression;
-        spdlog::trace("Report my port is {}", this->my_port);
-        spdlog::trace("My ID is assigned as {}", this->my_id);
-        return packet::send(fd, packet::report_port_packet{ .port = my_port });
+        spdlog::info("Registering and subscribing to a new peer : {}:{}", msg.addr, msg.port);
+
+        zmq::socket_t sub_endpoint(Context::get().zmq_ctx, zmq::socket_type::sub);
+        const auto sub_uri = fmt::format("tcp://{}:{}", msg.addr, msg.port);
+        sub_endpoint.connect(sub_uri);
+        sub_endpoint.set(zmq::sockopt::subscribe, "");  // filter nothing
+
+        spdlog::trace("New peer {} at {}:{} subscribed!", msg.peer_id, msg.addr, msg.port);
+
+        // Add to list of peers
+        this->peers.add(msg.peer_id, std::move(sub_endpoint), msg.addr, msg.port);
+
+        return OK;
     }
 };
 

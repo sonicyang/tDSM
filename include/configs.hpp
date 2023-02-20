@@ -50,8 +50,8 @@ auto inline get_frame_number(void* const addr) {
     return  (uaddr - base) / n_pages;
 }
 
-auto inline get_frame_address(const std::size_t frame_id) {
-    const auto base = reinterpret_cast<std::uintptr_t>(rdma_memory);
+auto inline get_frame_address(const std::size_t frame_id, const void* rdma_base = rdma_memory) {
+    const auto base = reinterpret_cast<std::uintptr_t>(rdma_base);
     // sanity check
     tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
         !(frame_id < n_pages),

@@ -28,17 +28,18 @@ std::uint8_t rdma_memory[rdma_size] __attribute__((section(".rdma"), aligned(pag
  * The values are temporary captured in 2 global variables.
  */
 
-ABSL_FLAG(bool, master, false, "Is master node");
+ABSL_FLAG(bool, directory, false, "Is directory node");
 ABSL_FLAG(bool, compression, false, "Use lz4 compression");
-ABSL_FLAG(std::string, ip, "127.0.0.1", "IP address of master");
-ABSL_FLAG(std::uint16_t, port, 7000, "TCP port for communication");
+ABSL_FLAG(std::string, directory_addr, "127.0.0.1", "IP address of directory");
+ABSL_FLAG(std::string, local_addr, "127.0.0.1", "IP address of this node");
+ABSL_FLAG(std::uint16_t, local_port, 7000, "TCP port for communication");
 
 namespace tDSM {
 
-std::string master_ip{};
-std::uint16_t my_port{};
-bool is_master;
-bool use_compression;
+namespace packet {
+    // dirity hack to get around the cyclic dependency problem
+    std::size_t my_id;
+}  // namespace
 
 namespace detail {
 static int argc;
@@ -47,13 +48,21 @@ static char** argv;
 struct StartUpInit {
     StartUpInit() {
         absl::SetProgramUsageMessage(fmt::format("Usage: {} master=<true/false> ip=<IP> port=<Port>\n", argv[0]));
+
         const auto args = absl::ParseCommandLine(argc, argv);
-        is_master = absl::GetFlag(FLAGS_master);
-        use_compression = absl::GetFlag(FLAGS_compression);
-        master_ip = absl::GetFlag(FLAGS_ip);
-        my_port = absl::GetFlag(FLAGS_port);
+
+        // Make sure the directory service is started first
+        const auto is_master = absl::GetFlag(FLAGS_directory);
+        if (is_master) {
+            const auto use_compression = absl::GetFlag(FLAGS_compression);
+            master_node::get().initialize(use_compression);
+        }
+
         // First call, initialized!
-        swapper::get();
+        const auto directory_addr = absl::GetFlag(FLAGS_directory_addr);
+        const auto local_addr = absl::GetFlag(FLAGS_local_addr);
+        const auto local_port = absl::GetFlag(FLAGS_local_port);
+        swapper::get().initialize(is_master, directory_addr, local_addr, local_port);
     }
 };
 }  // detail
