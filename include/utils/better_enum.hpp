@@ -24,7 +24,7 @@
     tDSM_EXPAND_ENUM_TO_STR(__VA_ARGS__)
 
 #define tDSM_BETTER_ENUM(type_name, base_type, ...) \
-    enum type_name : base_type { \
+    enum class type_name : base_type { \
         __VA_ARGS__ \
     }; \
     \
@@ -37,6 +37,7 @@
                 ret.emplace_back(src.substr(0, pos)); \
                 src.erase(0, pos + 1); \
             } \
+            ret.emplace_back(src); \
             return ret; \
         }(); \
         return str[static_cast<base_type>(e)]; \
