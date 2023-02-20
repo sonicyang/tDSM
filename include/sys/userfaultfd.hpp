@@ -200,8 +200,9 @@ class user_fault_fd : public file_descriptor {
             .mode = UFFDIO_CONTINUE_MODE_DONTWAKE,
             .mapped = 0
         };
+        const auto ret = ioctl(this->fd, UFFDIO_CONTINUE, &cont);
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
-            ioctl(this->fd, UFFDIO_CONTINUE, &cont),
+            ret && errno != EEXIST,  // skip if the mapping exists
             "Failed to solve minor fault pages @ {}, length: {} with UFFD API",
             addr, len
         );
