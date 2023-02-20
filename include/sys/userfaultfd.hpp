@@ -80,8 +80,8 @@ class user_fault_fd : public file_descriptor {
         return str;
     }
 
-    inline auto watch(volatile void* const addr, const std::size_t len) {
-        spdlog::debug("user_fault_fd start watch pages @ {}, length: {}", const_cast<void*>(addr), len);
+    inline auto watch(void* const addr, const std::size_t len) {
+        spdlog::debug("user_fault_fd start watch pages @ {}, length: {}", addr, len);
         uffdio_register register_msg = {
             .range = {
                 .start = reinterpret_cast<std::uintptr_t>(addr),
@@ -93,12 +93,12 @@ class user_fault_fd : public file_descriptor {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ioctl(this->fd, UFFDIO_REGISTER, &register_msg),
             "Failed to watch pages @ {}, length: {} with UFFD API",
-            const_cast<void*>(addr), len
+            addr, len
         );
     }
 
-    inline auto stop_watch(volatile void* const addr, const std::size_t len) {
-        spdlog::debug("user_fault_fd stop watch pages @ {}, length: {}", const_cast<void*>(addr), len);
+    inline auto stop_watch(void* const addr, const std::size_t len) {
+        spdlog::debug("user_fault_fd stop watch pages @ {}, length: {}", addr, len);
         uffdio_range range_msg = {
             .start = reinterpret_cast<std::uintptr_t>(addr),
             .len = len
@@ -106,7 +106,7 @@ class user_fault_fd : public file_descriptor {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ioctl(this->fd, UFFDIO_UNREGISTER, &range_msg),
             "Failed to stop watch pages @ {}, length: {} with UFFD API",
-            const_cast<void*>(addr), len
+            addr, len
         );
     }
 
@@ -138,8 +138,8 @@ class user_fault_fd : public file_descriptor {
         };
     }
 
-    inline auto write_protect(volatile void* const addr, const std::size_t len) {
-        spdlog::debug("user_fault_fd write protect pages @ {}, length: {}", const_cast<void*>(addr), len);
+    inline auto write_protect(void* const addr, const std::size_t len) {
+        spdlog::debug("user_fault_fd write protect pages @ {}, length: {}", addr, len);
         uffdio_writeprotect wp_msg {
             .range = {
                 .start = reinterpret_cast<std::uintptr_t>(addr),
@@ -150,12 +150,12 @@ class user_fault_fd : public file_descriptor {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ioctl(this->fd, UFFDIO_WRITEPROTECT, &wp_msg),
             "Failed to write protect pages @ {}, length: {} with UFFD API",
-            const_cast<void*>(addr), len
+            addr, len
         );
     }
 
-    inline auto write_unprotect(volatile void* const addr, const std::size_t len) {
-        spdlog::debug("user_fault_fd write unprotect pages @ {}, length: {}", const_cast<void*>(addr), len);
+    inline auto write_unprotect(void* const addr, const std::size_t len) {
+        spdlog::debug("user_fault_fd write unprotect pages @ {}, length: {}", addr, len);
 
         uffdio_writeprotect wp_msg {
             .range = {
@@ -167,12 +167,12 @@ class user_fault_fd : public file_descriptor {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ioctl(this->fd, UFFDIO_WRITEPROTECT, &wp_msg),
             "Failed to write unprotect pages @ {}, length: {} with UFFD API",
-            const_cast<void*>(addr), len
+            addr, len
         );
     }
 
-    inline auto zero(volatile void* const addr, const std::size_t len) {
-        spdlog::debug("user_fault_fd zero a page @ {}, length: {}", const_cast<void*>(addr), len);
+    inline auto zero(void* const addr, const std::size_t len) {
+        spdlog::debug("user_fault_fd zero a page @ {}, length: {}", addr, len);
 
         uffdio_zeropage zeropg{
             .range = {
@@ -185,12 +185,12 @@ class user_fault_fd : public file_descriptor {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ioctl(this->fd, UFFDIO_ZEROPAGE, &zeropg),
             "Failed to zero clear pages @ {}, length: {} with UFFD API",
-            const_cast<void*>(addr), len
+            addr, len
         );
     }
 
-    inline auto continue_(volatile void* const addr, const std::size_t len) {
-        spdlog::debug("user_fault_fd continue a page @ {}, length: {}", const_cast<void*>(addr), len);
+    inline auto continue_(void* const addr, const std::size_t len) {
+        spdlog::debug("user_fault_fd continue a page @ {}, length: {}", addr, len);
 
         uffdio_continue cont{
             .range = {
@@ -203,12 +203,12 @@ class user_fault_fd : public file_descriptor {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ioctl(this->fd, UFFDIO_CONTINUE, &cont),
             "Failed to solve minor fault pages @ {}, length: {} with UFFD API",
-            const_cast<void*>(addr), len
+            addr, len
         );
     }
 
-    inline auto wake(volatile void* const addr, const std::size_t len) {
-        spdlog::debug("user_fault_fd wake thread waiting on page @ {}, length: {}", const_cast<void*>(addr), len);
+    inline auto wake(void* const addr, const std::size_t len) {
+        spdlog::debug("user_fault_fd wake thread waiting on page @ {}, length: {}", addr, len);
 
         uffdio_range range_msg = {
             .start = reinterpret_cast<std::uintptr_t>(addr),
@@ -217,7 +217,7 @@ class user_fault_fd : public file_descriptor {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             ioctl(this->fd, UFFDIO_WAKE, &range_msg),
             "Failed to wait thread waiting on pages @ {}, length: {} with UFFD API",
-            const_cast<void*>(addr), len
+            addr, len
         );
     }
 };

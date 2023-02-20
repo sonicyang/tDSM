@@ -24,7 +24,7 @@ static inline constexpr auto page_size = 0x1000;  // 4KB, assumed
 static inline constexpr auto n_pages = 8;
 static inline constexpr auto rdma_size = page_size * n_pages;
 
-extern volatile std::uint8_t rdma_memory[rdma_size] __attribute__((section(".rdma"), aligned(page_size)));
+extern std::uint8_t rdma_memory[rdma_size] __attribute__((section(".rdma"), aligned(page_size)));
 static inline constexpr auto rdma_memory_ptr = const_cast<std::uint8_t*>(rdma_memory);
 
 template<typename T>

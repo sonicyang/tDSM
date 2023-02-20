@@ -16,7 +16,7 @@
 
 #include "swapper.hpp"
 
-volatile std::uint8_t rdma_memory[rdma_size] __attribute__((section(".rdma"), aligned(page_size)));
+std::uint8_t rdma_memory[rdma_size] __attribute__((section(".rdma"), aligned(page_size)));
 
 /**
  * We need to initialize the swapper using command line arguments.
