@@ -29,15 +29,25 @@ struct cancelable_thread {
     template<typename... Ts>
     cancelable_thread(Ts&&... ts) : evtfd(eventfd(0, 0)), thread(std::forward<Ts>(ts)...) {
         // Initialize eventfd, this is for unblocking the poll
-        if (this->evtfd.get() < 0) {
-            spdlog::error("Failed to get eventfd: {}", strerror(errno));
-            abort();
-        }
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(this->evtfd.get() < 0, "Failed to get eventfd");
     }
 
     cancelable_thread& operator=(std::thread&& ts) {
         this->stopped.store(false, std::memory_order_seq_cst);
         this->thread = std::forward<std::thread>(ts);
+        return *this;
+    }
+
+    cancelable_thread(cancelable_thread&& ts) :
+        evtfd(std::move(ts.evtfd)),
+        thread(std::move(ts.thread))
+    {
+    }
+
+    cancelable_thread& operator=(cancelable_thread&& ts) {
+        this->stopped.store(false, std::memory_order_seq_cst);
+        this->evtfd = std::move(ts.evtfd);
+        this->thread = std::move(ts.thread);
         return *this;
     }
 
