@@ -49,7 +49,6 @@ namespace tDSM::packet {
         configure,
         disconnect,
         register_peer,
-        unregister_peer,
         my_id,
         ask_page,
         send_page,
@@ -82,11 +81,6 @@ namespace tDSM::packet {
     DEFINE_PACKET(register_peer,
         std::uint64_t peer_id = 0x0;
         char addr[16];
-        std::uint16_t port = 0;
-    );
-
-    DEFINE_PACKET(unregister_peer,
-        std::uint32_t addr = 0;
         std::uint16_t port = 0;
     );
 

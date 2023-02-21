@@ -142,7 +142,6 @@ class Node {
             HANDLE(connect);
             HANDLE(configure);
             HANDLE(register_peer);
-            HANDLE(unregister_peer);
             HANDLE(my_id);
             HANDLE(ask_page);
             HANDLE(send_page);
@@ -171,7 +170,6 @@ class Node {
     HANDLER(connect)
     HANDLER(configure)
     HANDLER(register_peer)
-    HANDLER(unregister_peer)
     HANDLER(my_id)
     HANDLER(ask_page)
     HANDLER(send_page)
