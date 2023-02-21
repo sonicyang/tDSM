@@ -40,6 +40,7 @@ namespace tDSM::packet {
     extern std::size_t my_id;
 
     tDSM_BETTER_ENUM(packet_type, std::uint32_t,
+        noop,
         connect,
         configure,
         disconnect,
@@ -58,6 +59,8 @@ namespace tDSM::packet {
         std::size_t from{};
         packet_type type;
     } tDSM_PACKED_STRUCT;
+
+    DEFINE_PACKET(noop);
 
     DEFINE_PACKET(disconnect);
 
@@ -108,6 +111,7 @@ namespace tDSM::packet {
     );
 
     DEFINE_PACKET(sem_put,
+        std::size_t to = 0x0;
         std::uintptr_t address = 0x0;
     );
 

@@ -24,6 +24,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <semaphore>
 #include <string>
 #include <thread>
@@ -137,6 +138,7 @@ class Node {
                 (void)forward_packet<packet::disconnect_packet>(sock, message, &Node::handle_disconnect);
                 ret = true;
                 break;
+            HANDLE(noop);
             HANDLE(connect);
             HANDLE(configure);
             HANDLE(register_peer);
@@ -164,6 +166,7 @@ class Node {
         return OK; \
     }
 
+    HANDLER(noop)
     HANDLER(disconnect)
     HANDLER(connect)
     HANDLER(configure)
@@ -273,64 +276,78 @@ class master_node : public Node {
     }
 
     // semaphore list
-#if 0
-    mutable std::mutex sem_queue_mutex{};
+    mutable std::shared_mutex sem_queues_mutex{};
     struct sem_state {
+        mutable std::mutex mutex{};
         std::size_t count{};
-        std::deque<const sys::file_descriptor*> queue{};
+        std::deque<id_t> queue{};
     };
-    std::unordered_map<std::uintptr_t, sem_state> sem_queue[n_pages]{};
+    std::unordered_map<std::uintptr_t, sem_state> sem_queues{};
 
-    bool handle_sem_get(const sys::file_descriptor& fd, const packet::sem_get_packet& msg) final {
-        auto& peer           = this->peers[fd.get()];
-        const auto peer_id   = peer->id;
-        const auto& addr_str = peer->addr_str;
-        const auto port      = peer->port;
+    bool handle_sem_get(zmq::socket_ref, const packet::sem_get_packet& msg) final {
+        spdlog::trace("Queue sem get at 0x{:x} from ID: {}", msg.address, msg.hdr.from);
 
-        const auto frame_id = get_frame_number(reinterpret_cast<void*>(msg.address));
-        spdlog::trace("Queue sem get at 0x{:x} for {}:{}, ID: {}", msg.address, addr_str, port, peer_id);
-
-        std::scoped_lock<std::mutex> lk{this->sem_queue_mutex};
-        if (this->sem_queue[frame_id][msg.address].count > 0) {
-            this->sem_queue[frame_id][msg.address].count--;
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                packet::send(fd, packet::sem_put_packet{ .address = msg.address }),
-                "Failed sem put on 0x{:x} for {}:{}, ID {}",
-                msg.address, addr_str, port, peer_id
-            );
-        } else {
-            this->sem_queue[frame_id][msg.address].queue.emplace_back(&fd);
+        {
+            const auto nbytes = this->rpc_endpoint.send(packet::noop_packet{});
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::noop_packet), "Failed to send noop for sem_get");
         }
 
-        return false;
-    }
-
-    bool handle_sem_put(const sys::file_descriptor& fd, const packet::sem_put_packet& msg) final {
-        auto& peer           = this->peers[fd.get()];
-        const auto peer_id   = peer->id;
-        const auto& addr_str = peer->addr_str;
-        const auto port      = peer->port;
-
-        const auto frame_id = get_frame_number(reinterpret_cast<void*>(msg.address));
-        spdlog::trace("sem put at 0x{:x} for {}:{}, ID: {}", msg.address, addr_str, port, peer_id);
-
-        std::scoped_lock<std::mutex> lk{this->sem_queue_mutex};
-        if (this->sem_queue[frame_id][msg.address].queue.empty()) {
-            this->sem_queue[frame_id][msg.address].count++;
-        } else {
-            const auto fd_to_wake = this->sem_queue[frame_id][msg.address].queue.front();
-            this->sem_queue[frame_id][msg.address].queue.pop_front();
-
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                packet::send(*fd_to_wake, packet::sem_put_packet{ .address = msg.address }),
-                "Failed sem wake on 0x{:x} for {}:{}, ID {}",
-                msg.address, addr_str, port, peer_id
-            );
+        std::shared_lock<std::shared_mutex> lk(this->sem_queues_mutex);
+        if (!this->sem_queues.contains(msg.address)) {
+            lk.unlock();
+            std::unique_lock<std::shared_mutex> lk2(this->sem_queues_mutex);
+            if (!this->sem_queues.contains(msg.address)) {
+                this->sem_queues[msg.address].count = 0;
+            }
+            lk2.unlock();
+            lk.lock();
         }
 
-        return false;
+        std::unique_lock<std::mutex> lk2(this->sem_queues[msg.address].mutex);
+        if (this->sem_queues[msg.address].count > 0) {
+            this->sem_queues[msg.address].count--;
+
+            const auto nbytes = this->pub_endpoint.send(packet::sem_put_packet{ .to = msg.hdr.from, .address = msg.address });
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::sem_put_packet), "Failed to send sem_put packet");
+        } else {
+            this->sem_queues[msg.address].queue.emplace_back(msg.hdr.from);
+        }
+
+        return OK;
     }
-#endif
+
+    bool handle_sem_put(zmq::socket_ref, const packet::sem_put_packet& msg) final {
+        spdlog::trace("sem put at 0x{:x} from ID: {}", msg.address, msg.hdr.from);
+
+        {
+            const auto nbytes = this->rpc_endpoint.send(packet::noop_packet{});
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::noop_packet), "Failed to send noop for sem_put");
+        }
+
+        std::shared_lock<std::shared_mutex> lk(this->sem_queues_mutex);
+        if (!this->sem_queues.contains(msg.address)) {
+            lk.unlock();
+            std::unique_lock<std::shared_mutex> lk2(this->sem_queues_mutex);
+            if (!this->sem_queues.contains(msg.address)) {
+                this->sem_queues[msg.address].count = 0;
+            }
+            lk2.unlock();
+            lk.lock();
+        }
+
+        std::unique_lock<std::mutex> lk2(this->sem_queues[msg.address].mutex);
+        if (this->sem_queues[msg.address].queue.empty()) {
+            this->sem_queues[msg.address].count++;
+        } else {
+            const auto id_to_wake = this->sem_queues[msg.address].queue.front();
+            this->sem_queues[msg.address].queue.pop_front();
+
+            const auto nbytes = this->pub_endpoint.send(packet::sem_put_packet{ .to = id_to_wake, .address = msg.address });
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::sem_put_packet), "Failed to send sem_put packet");
+        }
+
+        return OK;
+    }
 };
 
 class peer_node : public Node {
