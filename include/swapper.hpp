@@ -305,8 +305,9 @@ class swapper : public peer_node {
             }
 
             const auto flags = size_to_send != 0 ? zmq::send_flags::sndmore : zmq::send_flags::dontwait;
-            auto nbytes = this->pub_endpoint.send(packet::send_page_packet{ .frame_id = frame_id, .size = size_to_send }, flags).value();
+            auto nbytes = this->pub_endpoint.send(packet::send_page_packet{ .frame_id = frame_id, .size = size_to_send }.to(peer_id), flags).value();
             if (size_to_send != 0) {
+                // Destination id followed the header above
                 nbytes  += this->pub_endpoint.send(zmq::const_buffer(ptr_to_send, size_to_send), zmq::send_flags::dontwait).value();
             }
 
@@ -415,7 +416,7 @@ class swapper : public peer_node {
             this->faultfd.write_protect(base_address, page_size);
             this->page_out_page(msg.frame_id);
 
-            const auto nbytes = this->pub_endpoint.send(packet::your_page_packet{ .frame_id = msg.frame_id });
+            const auto nbytes = this->pub_endpoint.send(packet::your_page_packet{ .frame_id = msg.frame_id }.to(peer_id));
             if (nbytes != sizeof(packet::your_page_packet)) {
                 spdlog::error("Error to handout ownership of frame : {}", frame_id);
                 return has_error;
@@ -601,10 +602,6 @@ class swapper : public peer_node {
     }
 
     bool handle_sem_put(zmq::socket_ref, const packet::sem_put_packet& msg) final {
-        if (msg.to != this->my_id) {
-            return OK;  // Not me
-        }
-
         auto& sem = [&]() -> decltype(auto) {
             std::shared_lock<std::shared_mutex> lk(this->sem_list_mutex);
             if (!this->sem_list.contains(msg.address)) {

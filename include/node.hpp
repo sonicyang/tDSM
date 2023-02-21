@@ -307,7 +307,7 @@ class master_node : public Node {
         if (this->sem_queues[msg.address].count > 0) {
             this->sem_queues[msg.address].count--;
 
-            const auto nbytes = this->pub_endpoint.send(packet::sem_put_packet{ .to = msg.hdr.from, .address = msg.address });
+            const auto nbytes = this->pub_endpoint.send(packet::sem_put_packet{ .address = msg.address }.to(msg.hdr.from));
             tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::sem_put_packet), "Failed to send sem_put packet");
         } else {
             this->sem_queues[msg.address].queue.emplace_back(msg.hdr.from);
@@ -342,7 +342,7 @@ class master_node : public Node {
             const auto id_to_wake = this->sem_queues[msg.address].queue.front();
             this->sem_queues[msg.address].queue.pop_front();
 
-            const auto nbytes = this->pub_endpoint.send(packet::sem_put_packet{ .to = id_to_wake, .address = msg.address });
+            const auto nbytes = this->pub_endpoint.send(packet::sem_put_packet{ .address = msg.address }.to(id_to_wake));
             tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::sem_put_packet), "Failed to send sem_put packet");
         }
 
@@ -464,7 +464,7 @@ class peer_node : public Node {
 
         const auto directory_sub_uri = fmt::format("tcp://{}:{}", directory_addr, directory_pub_port);
         directory_sub_endpoint.connect(directory_sub_uri);
-        directory_sub_endpoint.set(zmq::sockopt::subscribe, "");  // filter nothing
+        packet::subscribe_to_id(directory_sub_endpoint, 0);
 
         const auto directory_rpc_uri = fmt::format("tcp://{}:{}", directory_addr, directory_rpc_port);
         directory_rpc_endpoint.connect(directory_rpc_uri);
@@ -497,6 +497,8 @@ class peer_node : public Node {
         }
 
         // Start the processing thread after configuration, otherwise will race before acquiring our ID and subscribe to ourself because of the bypass guard failing in handle_register_peer
+        // Only subscribe to those packets for ID 0 and my_id
+        packet::subscribe_to_id(directory_sub_endpoint, this->my_id);
         this->directory_sub_thread = std::thread([this] { this->handle(this->directory_sub_endpoint, this->directory_sub_thread); });
 
         initialized = true;
@@ -510,7 +512,7 @@ class peer_node : public Node {
     }
 
     bool handle_register_peer(zmq::socket_ref, const packet::register_peer_packet& msg) final {
-        if (msg.peer_id == my_id || this->peers.get_peers().contains(msg.peer_id)) {  // no loop back, and duplication
+        if (msg.peer_id == this->my_id || this->peers.get_peers().contains(msg.peer_id)) {  // no loop back, and duplication
             return OK;
         }
 
@@ -519,7 +521,10 @@ class peer_node : public Node {
         zmq::socket_t sub_endpoint(Context::get().zmq_ctx, zmq::socket_type::sub);
         const auto sub_uri = fmt::format("tcp://{}:{}", msg.addr, msg.port);
         sub_endpoint.connect(sub_uri);
-        sub_endpoint.set(zmq::sockopt::subscribe, "");  // filter nothing
+        // Only subscribe to those packets for ID 0 and my_id
+        sub_endpoint.set(zmq::sockopt::subscribe, "");
+        //packet::subscribe_to_id(sub_endpoint, 0);
+        //packet::subscribe_to_id(sub_endpoint, this->my_id);
 
         spdlog::trace("New peer {} at {}:{} subscribed!", msg.peer_id, msg.addr, msg.port);
 

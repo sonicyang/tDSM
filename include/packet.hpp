@@ -32,6 +32,10 @@
     struct name##_packet { \
         packet_header hdr = { .from = my_id, .type = packet_type::name }; \
         __VA_ARGS__ \
+        auto to(const std::size_t to_id) { \
+            this->hdr.to = to_id; \
+            return *this; \
+        } \
         operator zmq::const_buffer() const { return zmq::buffer(this, sizeof(name##_packet)); } \
     } tDSM_PACKED_STRUCT
 
@@ -56,6 +60,7 @@ namespace tDSM::packet {
     );
 
     struct packet_header {
+        std::size_t to{};
         std::size_t from{};
         packet_type type;
     } tDSM_PACKED_STRUCT;
@@ -111,13 +116,13 @@ namespace tDSM::packet {
     );
 
     DEFINE_PACKET(sem_put,
-        std::size_t to = 0x0;
         std::uintptr_t address = 0x0;
     );
 
-    template<typename T>
-    static inline zmq::const_buffer make_zmq_const_buffer(const T& packet) {
-        return zmq::buffer(&packet, sizeof(packet));
+    static inline auto subscribe_to_id(auto& sock, const std::size_t id) {
+        char id_char[sizeof(id)];
+        std::memcpy(id_char, &id, sizeof(id));
+        sock.set(zmq::sockopt::subscribe, zmq::const_buffer(id_char, sizeof(id_char)));
     }
 }  // tDSM::packet
 
