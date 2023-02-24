@@ -55,7 +55,11 @@ namespace tDSM::packet {
         my_page,
         your_page,
         sem_get,
-        sem_put
+        sem_put,
+        call,
+        call_ack,
+        ret,
+        ret_ack
     );
 
     struct packet_header {
@@ -111,6 +115,25 @@ namespace tDSM::packet {
 
     DEFINE_PACKET(sem_put,
         std::uintptr_t address = 0x0;
+    );
+
+    DEFINE_PACKET(call,
+        std::size_t call_id = 0x0;
+        std::size_t action = 0x0;
+        std::size_t size = 0x0;
+    );
+
+    DEFINE_PACKET(call_ack,
+        std::size_t call_id = 0x0;
+    );
+
+    DEFINE_PACKET(ret,
+        std::size_t call_id = 0x0;
+        std::size_t size = 0x0;
+    );
+
+    DEFINE_PACKET(ret_ack,
+        std::size_t call_id = 0x0;
     );
 
     static inline auto subscribe_to_id(auto& sock, const std::size_t id) {

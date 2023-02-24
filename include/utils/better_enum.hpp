@@ -40,5 +40,5 @@
             ret.emplace_back(src); \
             return ret; \
         }(); \
-        return str[static_cast<base_type>(e)]; \
+        return str[static_cast<std::size_t>(e)]; \
     }

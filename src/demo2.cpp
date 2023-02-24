@@ -17,7 +17,9 @@
 #include "node.hpp"
 #include "swapper.hpp"
 
-int main() {
+int main(const int argc, char* argv[]) {
+    tDSM::initialize(argc, argv);
+
     auto& swapper = tDSM::swapper::get();
     auto memory = swapper.memory();
 
@@ -26,7 +28,7 @@ int main() {
         spdlog::info("{:x} {:x}", memory[0], memory[1]);
         memory[1] = i;
         i++;
-        usleep(1000);
+        usleep(1000000);
     }
 
     //swapper.sem_get(reinterpret_cast<std::uintptr_t>(&memory[1]));
@@ -41,7 +43,4 @@ int main() {
             //swapper.sem_put(reinterpret_cast<std::uintptr_t>(&memory[1]));
         //}
     //}
-
-    sleep(5);
-    return 0;
 }

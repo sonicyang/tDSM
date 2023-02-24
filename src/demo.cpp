@@ -14,22 +14,58 @@
 #include <spdlog/spdlog.h>
 #include <cstdint>
 
+#include "configs.hpp"
 #include "node.hpp"
 #include "swapper.hpp"
+#include "rpc_adapter.hpp"
 
-int main() {
+int add2(int a, int b);
+int add2(int a, int b) {
+    spdlog::info("{} + {}", a, b);
+    return a + b;
+}
+
+void increase(int& a);
+void increase(int& a) {
+    a++;
+}
+
+static tDSM::rpc::simple_rpc_adapter<add2> rpc_add2;
+static tDSM::rpc::simple_rpc_adapter<increase> rpc_increase;
+
+int main(const int argc, char* argv[]) {
+    tDSM::initialize(argc, argv);
+    tDSM::swapper::get().wait_for_peer(2);
+
     auto& swapper = tDSM::swapper::get();
     auto memory = swapper.memory();
 
-    std::uint8_t i = 0;
-    while(true) {
-        spdlog::info("{:x} {:x}", memory[0], memory[1]);
-        memory[0] = i;
-        i++;
-        usleep(1000);
-        //assert(tDSM::packet::my_id != 0);
+    int a = 1;
+    int b = 2;
+    spdlog::info("Local {}", add2(a, b));
 
-    }
+    rpc_add2.remote = 2;
+
+    spdlog::info("Remote {}", rpc_add2(a, b));
+
+    int *inc = reinterpret_cast<int*>(memory);
+
+    increase(*inc);
+    spdlog::info("Inc Local {} {}", *inc, static_cast<void*>(inc));
+
+    rpc_increase.remote = 2;
+
+    rpc_increase(*inc);
+    spdlog::info("Inc Remote {}", *inc);
+
+    //std::uint8_t i = 0;
+    //while(true) {
+        //spdlog::info("{:x} {:x}", memory[0], memory[1]);
+        //memory[0] = i;
+        //i++;
+        //usleep(1000);
+        ////assert(tDSM::packet::my_id != 0);
+    //}
 
     //swapper.sem_put(reinterpret_cast<std::uintptr_t>(&memory[0]));
 
@@ -48,6 +84,6 @@ int main() {
         //}
     //}
 
-    sleep(100000);
+    //sleep(100000);
     return 0;
 }

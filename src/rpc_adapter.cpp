@@ -11,16 +11,14 @@
  * http://www.wtfpl.net/ for more details.
  */
 
-#include <atomic>
-#include <string>
-#include <iostream>
+#include "zmq.hpp"
 
-#include "swapper.hpp"
+#include "rpc_adapter.hpp"
 
-std::uint8_t rdma_memory[rdma_size] __attribute__((section(".rdma"), aligned(page_size)));
+namespace tDSM::rpc {
 
-namespace tDSM::packet {
-    // dirity hack to get around the cyclic dependency problem
-    std::size_t my_id;
+zmq::message_t dispatch_rpc(const std::size_t action, const zmq::message_t& args) {
+    return rpc_adapter_base::rpc_list[action](args);
+}
 
-}  // namespace tDSM::packet
+}  // namespace tDSM::rpc

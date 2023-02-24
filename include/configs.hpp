@@ -36,7 +36,7 @@ static inline constexpr auto round_down_to_page_boundary(T address) {
             return reinterpret_cast<std::uintptr_t>(address);
         }
     }();
-    return reinterpret_cast<T>(uptr & ~(page_size - 1));
+    return reinterpret_cast<T>(uptr & ~static_cast<std::uintptr_t>(page_size - 1));
 }
 
 auto inline get_frame_number(void* const addr) {
@@ -59,3 +59,10 @@ auto inline get_frame_address(const std::size_t frame_id, const void* rdma_base 
     );
     return reinterpret_cast<void*>(frame_id * page_size + base);
 }
+
+
+namespace tDSM {
+
+void initialize(const int argc, char* argv[]);
+
+}  // namespace tDSM

@@ -70,10 +70,23 @@ function(add_rdma_executable NAME)
         target_compile_options(${NAME} PUBLIC -Wno-global-constructors)
         # STFU
         target_compile_options(${NAME} PUBLIC -Wno-weak-vtables)
+
+        # ABSL need This
+        target_compile_options(${NAME} PUBLIC -Wno-reserved-identifier)
+        # lz4 need this
+        target_compile_options(${NAME} PUBLIC -Wno-old-style-cast)
+        # fmt need this
+        target_compile_options(${NAME} PUBLIC -Wno-undefined-func-template)
+        target_compile_options(${NAME} PUBLIC -Wno-switch-enum)
+        target_compile_options(${NAME} PUBLIC -Wno-float-equal)
+        target_compile_options(${NAME} PUBLIC -Wno-documentation-unknown-command)
+        # zmq need this
+        target_compile_options(${NAME} PUBLIC -Wno-reserved-macro-identifier)
+        target_compile_options(${NAME} PUBLIC -Wno-missing-noreturn)
     endif()
 endfunction()
 
 
 #file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS ${ARGN})
-add_rdma_executable(rdma src/demo.cpp src/swapper.cpp src/logging.cpp)
-add_rdma_executable(rdma2 src/demo2.cpp src/swapper.cpp src/logging.cpp)
+add_rdma_executable(rdma src/demo.cpp src/initialize.cpp src/swapper.cpp src/logging.cpp src/rpc_adapter.cpp)
+add_rdma_executable(rdma2 src/demo2.cpp src/initialize.cpp src/swapper.cpp src/logging.cpp src/rpc_adapter.cpp)

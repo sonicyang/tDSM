@@ -20,11 +20,8 @@
 #include <sys/syscall.h>
 #include <linux/userfaultfd.h>
 
-#include <absl/flags/flag.h>
-#include <absl/flags/parse.h>
-#include <absl/flags/usage.h>
-#include <spdlog/spdlog.h>
-#include <spdlog/stopwatch.h>
+#include "spdlog/spdlog.h"
+#include "spdlog/stopwatch.h"
 
 #include <algorithm>
 #include <atomic>
@@ -114,6 +111,10 @@ class swapper : public peer_node {
         );
     }
 
+    inline auto wait_for_peer(const id_t peer_id) {
+        this->peers.wait_for_peer(peer_id);
+    }
+
     inline auto initialize(const bool is_master, const std::string& directory_addr_, const std::string& my_addr_, const std::uint16_t my_port_) {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(initialized, "Cannot initialize twice");
 
@@ -175,6 +176,13 @@ class swapper : public peer_node {
             );
         }
 
+
+        {
+            std::scoped_lock<std::mutex> lk(this->additional_timeout_handler_mutex);
+            this->additional_timeout_handler.emplace_back([this] { this->check_timeout_ask_page(); });
+            this->additional_timeout_handler.emplace_back([this] { this->check_timeout_send_page(); });
+        }
+
         // start the swapper thread
         this->thread = std::thread([this] {
             this->run();
@@ -195,23 +203,19 @@ class swapper : public peer_node {
     swapper(swapper&&) = delete;
     swapper& operator=(swapper&&) = delete;
 
-    // The worker thread
-    utils::cancelable_thread thread{};
-
     // Backing memory and memory management
     const sys::file_descriptor backing_memory_fd;
     sys::user_fault_fd faultfd{};
 
-    // Transmission timeout monitor
-    utils::cancelable_thread timeout_monitor = std::thread([this] { this->timeout_monitor_handler(); });
-    sys::timer_fd timeout_timer_fd{};
+    // The worker thread
+    utils::cancelable_thread thread{};
 
     tDSM_BETTER_ENUM(state, int,
         shared,
         shared_had_owned_page,
         invalid,
         exclusive
-    );
+    )
 
     std::atomic<state> states[n_pages]{};
     unsigned char* rdma_region_rw;
@@ -275,6 +279,7 @@ class swapper : public peer_node {
         const auto peer_id       = msg.hdr.from;
         const auto frame_id      = msg.frame_id;
         const auto base_address  = get_frame_address(frame_id);
+        const auto rw_address    = get_frame_address(frame_id, this->rdma_region_rw);
 
         spdlog::trace("{} asked for page {}", peer_id, frame_id);
 
@@ -287,7 +292,7 @@ class swapper : public peer_node {
             }
 
             // Default if no compressed
-            const void* ptr_to_send = base_address;
+            const void* ptr_to_send = rw_address;
             std::size_t size_to_send = page_size;
 
             constexpr auto data_max_size = LZ4_COMPRESSBOUND(page_size);
@@ -296,7 +301,7 @@ class swapper : public peer_node {
             if (this->use_compression) {
                 ptr_to_send = compressed;
 
-                size_to_send = static_cast<std::size_t>(LZ4_compress_default(reinterpret_cast<char*>(base_address), reinterpret_cast<char*>(compressed), page_size, data_max_size));
+                size_to_send = static_cast<std::size_t>(LZ4_compress_default(reinterpret_cast<char*>(rw_address), reinterpret_cast<char*>(compressed), page_size, data_max_size));
                 tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
                     size_to_send == 0, "Failed to compress page data"
                 );
@@ -304,6 +309,7 @@ class swapper : public peer_node {
                 spdlog::trace("Compression {} to {}, {}%", page_size, size_to_send, static_cast<double>(page_size - size_to_send) / page_size * 100);
             }
 
+            std::scoped_lock<std::mutex> lk(this->pub_endpoint_mutex);
             const auto flags = size_to_send != 0 ? zmq::send_flags::sndmore : zmq::send_flags::dontwait;
             auto nbytes = this->pub_endpoint.send(packet::send_page_packet{ .frame_id = frame_id, .size = size_to_send }.to(peer_id), flags).value();
             if (size_to_send != 0) {
@@ -351,7 +357,7 @@ class swapper : public peer_node {
                 }
 
                 if (this->use_compression) {
-                    const auto recv_size = LZ4_decompress_safe(reinterpret_cast<char*>(address_to_write), reinterpret_cast<char*>(writable_address), msg.size, page_size);
+                    const auto recv_size = LZ4_decompress_safe(reinterpret_cast<char*>(address_to_write), reinterpret_cast<char*>(writable_address), static_cast<int>(msg.size), page_size);
                     if (recv_size == 0) {
                         spdlog::error("Error on decompression");
                         return has_error;
@@ -500,7 +506,7 @@ class swapper : public peer_node {
                 }
             }
 
-            if (faulted) {
+            if (faulted && this->faultfd.get() != -1) {
                 // Read the page fault information
                 const auto fault         = swapper::faultfd.read();
                 const auto frame_id      = get_frame_number(fault.address);
@@ -554,48 +560,25 @@ class swapper : public peer_node {
         this->peers.clear();
     }
 
-    inline void timeout_monitor_handler() {
-        this->timeout_timer_fd.periodic(
-            timespec {
-                .tv_sec = 1,
-                .tv_nsec = 0
-            },
-            timespec {
-                .tv_sec = 2,
-                .tv_nsec = 0
-            }
-        );
-
-        const auto epollfd = sys::epoll(this->timeout_timer_fd, this->thread.evtfd);
-        while (!this->thread.stopped.load(std::memory_order_acquire)) {
-            // Wait for page fault or remote call
-            const auto [count, events] = epollfd.wait();
-            if ((count <= 0) || epollfd.check_fd_in_result(events, this->thread.evtfd)) {
-                continue;
-            }
-
-            std::uint64_t expire_count;
-            const auto nbytes = ::read(this->timeout_timer_fd.get(), &expire_count, sizeof(expire_count));
-            if (nbytes != sizeof(expire_count)) {
-                spdlog::error("Reading from timer fd failed! : {}", strerror(errno));
-                continue;
-            }
-
-            for (frame_id_t frame_id = 0; frame_id < n_pages; ++frame_id) {
-                {
-                    std::scoped_lock<std::mutex> lk{this->read_fencing_mutex[frame_id]};
-                    if (this->out_standing_read[frame_id] == true) {
-                        spdlog::debug("Timeout, asking frame {} again {} {}", frame_id, packet::my_id, packet::ask_page_packet{ .frame_id = frame_id }.hdr.from);
-                        this->pub_endpoint.send(packet::ask_page_packet{ .frame_id = frame_id });
-                    }
+    inline void check_timeout_ask_page() {
+        for (frame_id_t frame_id = 0; frame_id < n_pages; ++frame_id) {
+            {
+                std::scoped_lock<std::mutex> lk{this->read_fencing_mutex[frame_id]};
+                if (this->out_standing_read[frame_id] == true) {
+                    spdlog::debug("Timeout, asking frame {} again {} {}", frame_id, packet::my_id, packet::ask_page_packet{ .frame_id = frame_id }.hdr.from);
+                    this->pub_endpoint.send(packet::ask_page_packet{ .frame_id = frame_id });
                 }
+            }
+        }
+    }
 
-                {
-                    std::scoped_lock<std::mutex> lk{this->write_fencing_mutex[frame_id]};
-                    if (this->out_standing_write[frame_id] == true) {
-                        spdlog::debug("Timeout, taking ownership of frame {} again", frame_id);
-                        this->pub_endpoint.send(packet::my_page_packet{ .frame_id = frame_id });
-                    }
+    inline void check_timeout_send_page() {
+        for (frame_id_t frame_id = 0; frame_id < n_pages; ++frame_id) {
+            {
+                std::scoped_lock<std::mutex> lk{this->write_fencing_mutex[frame_id]};
+                if (this->out_standing_write[frame_id] == true) {
+                    spdlog::debug("Timeout, taking ownership of frame {} again", frame_id);
+                    this->pub_endpoint.send(packet::my_page_packet{ .frame_id = frame_id });
                 }
             }
         }
