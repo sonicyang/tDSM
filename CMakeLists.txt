@@ -28,22 +28,27 @@ add_subdirectory(3rdparty/spdlog)
 
 add_compile_definitions(ZMQ_BUILD_DRAFT_API)
 
-function(add_rdma_executable NAME)
-    add_executable(${NAME} ${ARGN})
+function(create_tdsm_library)
+    set(NAME tdsm)
 
-    target_include_directories(${NAME} PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    file(GLOB_RECURSE TDSM_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*)
+    add_library(${NAME} STATIC
+        ${TDSM_SOURCES}
+    )
 
-    target_link_libraries(${NAME} PRIVATE 
+    target_link_libraries(${NAME} PUBLIC 
         fmt
         spdlog::spdlog
         lz4_static
         cppzmq
     )
-    target_link_options(${NAME} PRIVATE "-no-pie")
+
+    target_include_directories(${NAME} PUBLIC ${CMAKE_SOURCE_DIR}/include)
+    target_link_options(${NAME} PUBLIC "-no-pie")
 
     set(${NAME}_LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/linker_script/rdma.ld)
     set_target_properties(${NAME} PROPERTIES LINK_DEPENDS ${${NAME}_LINKER_SCRIPT})
-    target_link_options(${NAME} PRIVATE "${${NAME}_LINKER_SCRIPT}")
+    target_link_options(${NAME} PUBLIC "${${NAME}_LINKER_SCRIPT}")
 
     target_compile_options(${NAME} PUBLIC -Wall)
     target_compile_options(${NAME} PUBLIC -Wextra)
@@ -80,6 +85,15 @@ function(add_rdma_executable NAME)
     endif()
 endfunction()
 
-#file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS ${ARGN})
-#add_rdma_executable(rdma src/demo.cpp src/initialize.cpp src/swapper.cpp src/logging.cpp src/rpc_adapter.cpp)
-add_rdma_executable(memtest src/memtest.cpp src/initialize.cpp src/swapper.cpp src/logging.cpp src/rpc_adapter.cpp)
+function(add_rdma_executable NAME)
+    add_executable(${NAME} ${ARGN})
+
+    target_link_libraries(${NAME} PRIVATE 
+        tdsm
+    )
+endfunction()
+
+create_tdsm_library()
+
+add_rdma_executable(demo test/demo.cpp)
+add_rdma_executable(memtest test/memtest.cpp)
