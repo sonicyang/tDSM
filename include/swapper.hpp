@@ -92,7 +92,7 @@ class swapper : public peer_node {
             return this->sem_list[address];
         }();
 
-        spdlog::trace("Semaphore: get {:x}", address);
+        logger->trace("Semaphore: get {:x}", address);
 
         sem->acquire();
     }
@@ -124,13 +124,13 @@ class swapper : public peer_node {
     inline auto initialize(const bool is_master, const std::string& directory_addr_, const std::string& my_addr_, const std::uint16_t my_port_) {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(initialized, "Cannot initialize twice");
 
-        spdlog::info("Initializing communication...");
+        logger->info("Initializing communication...");
 
         peer_node::initialize(directory_addr_, my_addr_, my_port_);
 
-        spdlog::info("Initializing RDMA swapper...");
+        logger->info("Initializing RDMA swapper...");
 
-        spdlog::info("Creating backing memory...");
+        logger->info("Creating backing memory...");
 
         // Using memfd as the backing memory to allow retaining the data on memory
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
@@ -142,7 +142,7 @@ class swapper : public peer_node {
             "Failed to truncate backing memory to specified size"
         );
 
-        spdlog::info("Mapping backing memory...");
+        logger->info("Mapping backing memory...");
         // For the main process, create backing memory
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
             madvise(rdma_memory_ptr, rdma_size, MADV_NOHUGEPAGE),
@@ -153,7 +153,7 @@ class swapper : public peer_node {
             "Failed to map the backing memory"
         );
 
-        spdlog::info("Initializing user_fault_fd...");
+        logger->info("Initializing user_fault_fd...");
 
         this->rdma_region_rw = reinterpret_cast<unsigned char*>(mmap(nullptr, rdma_size, PROT_WRITE | PROT_READ, MAP_SHARED, this->backing_memory_fd.get(), 0));
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR_WITH_ERRNO(
@@ -242,7 +242,7 @@ class swapper : public peer_node {
 
     inline auto ask_page(const frame_id_t frame_id) {
         // Download the page data from owner
-        spdlog::debug("Asking frame {} {} {}", frame_id, packet::ask_page_packet{ .frame_id = frame_id }.hdr.from, packet::my_id);
+        logger->debug("Asking frame {} {} {}", frame_id, packet::ask_page_packet{ .frame_id = frame_id }.hdr.from, packet::my_id);
         {
             std::scoped_lock<std::mutex> lk{this->read_fencing_mutex[frame_id]};
             this->read_fencing_set[frame_id].clear();
@@ -254,7 +254,7 @@ class swapper : public peer_node {
 
     inline auto own_page(const frame_id_t frame_id) {
         // Make page exclusive for us
-        spdlog::debug("Take ownership of frame {}", frame_id);
+        logger->debug("Take ownership of frame {}", frame_id);
         {
             std::scoped_lock<std::mutex> lk{this->write_fencing_mutex[frame_id]};
             this->write_fencing_set[frame_id].clear();
@@ -265,18 +265,18 @@ class swapper : public peer_node {
     }
 
     inline auto page_out_page(const frame_id_t frame_id) {
-        spdlog::debug("Page out frame: {}", frame_id);
+        logger->debug("Page out frame: {}", frame_id);
         while (true) {
             const auto err = madvise(get_frame_address(frame_id), page_size, MADV_DONTNEED);
             if (err == 0) {
                 return;
             }
-            spdlog::error("Failed to page out a frame {} : {}", frame_id, strerror(errno));
+            logger->error("Failed to page out a frame {} : {}", frame_id, strerror(errno));
         }
     }
 
     inline auto set_frame_state(const frame_id_t frame_id, const state s,  const std::memory_order order = std::memory_order_seq_cst) {
-        spdlog::debug("Set frame {} state as {}", frame_id, state_to_string(s));
+        logger->trace("Set frame {} state as {}", frame_id, state_to_string(s));
         states[frame_id].store(s, order);
     }
 
@@ -287,7 +287,7 @@ class swapper : public peer_node {
         const auto base_address  = get_frame_address(frame_id);
         const auto rw_address    = get_frame_address(frame_id, this->rdma_region_rw);
 
-        spdlog::trace("{} asked for page {}", peer_id, frame_id);
+        logger->debug("{} asked for page {}", peer_id, frame_id);
 
         const auto current_state = this->states[frame_id].load(std::memory_order_acquire);
         if (current_state == state::exclusive || current_state == state::shared_had_owned_page) {
@@ -312,7 +312,7 @@ class swapper : public peer_node {
                     size_to_send == 0, "Failed to compress page data"
                 );
 
-                spdlog::trace("Compression {} to {}, {}%", page_size, size_to_send, static_cast<double>(page_size - size_to_send) / page_size * 100);
+                logger->trace("Compression {} to {}, {}%", page_size, size_to_send, static_cast<double>(page_size - size_to_send) / page_size * 100);
             }
 
             std::scoped_lock<std::mutex> lk(this->pub_endpoint_mutex);
@@ -324,7 +324,7 @@ class swapper : public peer_node {
             }
 
             if (nbytes < sizeof(packet::send_page_packet) + size_to_send) {
-                spdlog::error("Failed send a page");
+                logger->error("Failed send a page");
                 // timeout will handle the rest and a retransmission should happen
             }
         } else {
@@ -338,7 +338,7 @@ class swapper : public peer_node {
         const auto peer_id  = msg.hdr.from;
         const auto frame_id = msg.frame_id;
 
-        spdlog::debug("{} sent page {}", peer_id, frame_id);
+        logger->debug("{} sent page {}", peer_id, frame_id);
 
         constexpr auto data_max_size = LZ4_COMPRESSBOUND(page_size);
 
@@ -358,14 +358,14 @@ class swapper : public peer_node {
 
                 const auto nbytes = sock.recv(zmq::mutable_buffer(address_to_write, msg.size), zmq::recv_flags::none);
                 if (!nbytes.has_value() || nbytes.value().size != msg.size) {
-                    spdlog::error("Error on receive page");
+                    logger->error("Error on receive page");
                     return has_error;
                 }
 
                 if (this->use_compression) {
                     const auto recv_size = LZ4_decompress_safe(reinterpret_cast<char*>(address_to_write), reinterpret_cast<char*>(writable_address), static_cast<int>(msg.size), page_size);
                     if (recv_size == 0) {
-                        spdlog::error("Error on decompression");
+                        logger->error("Error on decompression");
                         return has_error;
                     }
                 }
@@ -380,13 +380,13 @@ class swapper : public peer_node {
                 this->faultfd.wake(base_address, page_size);
             }
         } else {
-            spdlog::trace("Frame {} received, discarding", frame_id);
+            logger->trace("Frame {} received, discarding", frame_id);
 
             std::uint8_t dummy[std::max(page_size, data_max_size)];
 
             const auto nbytes = sock.recv(zmq::mutable_buffer(dummy, msg.size), zmq::recv_flags::none);
             if (!nbytes.has_value() || nbytes.value().size != msg.size) {
-                spdlog::error("Error on receive page");
+                logger->error("Error on receive page");
                 return has_error;
             }
         }
@@ -399,7 +399,7 @@ class swapper : public peer_node {
         const auto peer_id  = msg.hdr.from;
         const auto frame_id = msg.frame_id;
 
-        spdlog::debug("{} take ownership of page {}", peer_id, frame_id);
+        logger->debug("{} take ownership of page {}", peer_id, frame_id);
 
         {
             std::scoped_lock<std::mutex> lk{this->read_fencing_mutex[frame_id]};
@@ -417,7 +417,7 @@ class swapper : public peer_node {
             // We have priority, ignore the request, tell them WE OWN THE PAGE!!
             const auto nbytes = this->pub_endpoint.send(packet::my_page_packet{ .frame_id = msg.frame_id });
             if (nbytes != sizeof(packet::my_page_packet)) {
-                spdlog::error("Error to notify ownership of frame : {}", frame_id);
+                logger->error("Error to notify ownership of frame : {}", frame_id);
                 return has_error;
             }
         } else {
@@ -430,7 +430,7 @@ class swapper : public peer_node {
 
             const auto nbytes = this->pub_endpoint.send(packet::your_page_packet{ .frame_id = msg.frame_id }.to(peer_id));
             if (nbytes != sizeof(packet::your_page_packet)) {
-                spdlog::error("Error to handout ownership of frame : {}", frame_id);
+                logger->error("Error to handout ownership of frame : {}", frame_id);
                 return has_error;
             }
 
@@ -451,7 +451,7 @@ class swapper : public peer_node {
         const auto peer_id  = msg.hdr.from;
         const auto frame_id = msg.frame_id;
 
-        spdlog::trace("{} give ownership of page {}", peer_id, frame_id);
+        logger->debug("{} give ownership of page {}", peer_id, frame_id);
 
         std::scoped_lock<std::mutex> lk{this->write_fencing_mutex[frame_id]};
         this->write_fencing_set[frame_id].emplace(peer_id);
@@ -472,6 +472,7 @@ class swapper : public peer_node {
     // Actual worker thread function
     inline void run() {
         auto& poller = this->peers.get_poller();
+        //poller.add(this->directory_rpc_endpoint, zmq::event_flags::pollin);
         poller.add_fd(this->faultfd.get(), zmq::event_flags::pollin);
         poller.add_fd(this->thread.evtfd.get(), zmq::event_flags::pollin);
 
@@ -499,7 +500,7 @@ class swapper : public peer_node {
                 zmq::message_t message;
                 const auto nbytes = event.socket.recv(message, zmq::recv_flags::none);
                 if (nbytes < sizeof(packet::packet_header)) {
-                    spdlog::error("Received invalid packet");
+                    logger->error("Received invalid packet");
                     continue;
                 }
 
@@ -508,7 +509,7 @@ class swapper : public peer_node {
 
                 // Default actions
                 if (this->handle_a_packet(event.socket, message)) {
-                    spdlog::info("swapper connection to peer {} ended!", peer_id);
+                    logger->debug("swapper connection to peer {} ended!", peer_id);
                 }
             }
 
@@ -519,7 +520,7 @@ class swapper : public peer_node {
                 const auto base_address  = round_down_to_page_boundary(fault.address);
                 const auto current_state = this->states[frame_id].load(std::memory_order_acquire);
 
-                spdlog::trace("swapper processing frame {} @ {}, state: {}, is_write: {}",
+                logger->trace("swapper processing frame {} @ {}, state: {}, is_write: {}",
                     frame_id,
                     fault.address,
                     state_to_string(current_state),
@@ -546,7 +547,6 @@ class swapper : public peer_node {
                     this->own_page(frame_id);
 
                     if (fault.is_minor) {
-                        spdlog::error("2");
                         this->faultfd.continue_(base_address, page_size);
                     }
                     // continue with YOUR_PAGE response handling
@@ -571,7 +571,7 @@ class swapper : public peer_node {
             {
                 std::scoped_lock<std::mutex> lk{this->read_fencing_mutex[frame_id]};
                 if (this->out_standing_read[frame_id] == true) {
-                    spdlog::debug("Timeout, asking frame {} again {} {}", frame_id, packet::my_id, packet::ask_page_packet{ .frame_id = frame_id }.hdr.from);
+                    logger->debug("Timeout, asking frame {} again {} {}", frame_id, packet::my_id, packet::ask_page_packet{ .frame_id = frame_id }.hdr.from);
                     this->pub_endpoint.send(packet::ask_page_packet{ .frame_id = frame_id });
                 }
             }
@@ -583,7 +583,7 @@ class swapper : public peer_node {
             {
                 std::scoped_lock<std::mutex> lk{this->write_fencing_mutex[frame_id]};
                 if (this->out_standing_write[frame_id] == true) {
-                    spdlog::debug("Timeout, taking ownership of frame {} again", frame_id);
+                    logger->debug("Timeout, taking ownership of frame {} again", frame_id);
                     this->pub_endpoint.send(packet::my_page_packet{ .frame_id = frame_id });
                 }
             }
@@ -605,7 +605,7 @@ class swapper : public peer_node {
             return this->sem_list[msg.address];
         }();
 
-        spdlog::trace("Semaphore: put {:x}", msg.address);
+        logger->trace("Semaphore: put {:x}", msg.address);
 
         sem->release(1);
         return OK;

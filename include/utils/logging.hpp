@@ -13,9 +13,17 @@
 
 #pragma once
 #include <cerrno>
-#include <spdlog/spdlog.h>
 #include <string>
 #include <utility>
+
+#include "spdlog/spdlog.h"
+#include "spdlog/sinks/stdout_color_sinks.h"
+
+namespace tDSM {
+
+extern std::shared_ptr<spdlog::logger> logger;
+
+}  // namespace tDSM
 
 #define tDSM_CONCAT(a, b) tDSM_CONCAT_INNER(a, b)
 #define tDSM_CONCAT_INNER(a, b) a ## b
@@ -23,8 +31,8 @@
 #define tDSM_UNIQUE_NAME(base) tDSM_CONCAT(base, __COUNTER__)
 
 #define tDSM_SPDLOG_PERROR(...) do { \
-    spdlog::error(__VA_ARGS__); \
-    spdlog::error("Errno : {}", strerror(errno)); \
+    ::tDSM::logger->error(__VA_ARGS__); \
+    ::tDSM::logger->error("Errno : {}", strerror(errno)); \
 } while(false)
 
 #define tDSM_SPDLOG_DUMP_IF_ERROR(...) tDSM_SPDLOG_DUMP_IF_ERROR_(tDSM_UNIQUE_NAME(_error), __VA_ARGS__)
@@ -32,7 +40,7 @@
     bool vname{}; \
     vname = (statement); \
     if (vname) { \
-        spdlog::error(__VA_ARGS__); \
+        ::tDSM::logger->error(__VA_ARGS__); \
     }\
     return vname; \
 }())

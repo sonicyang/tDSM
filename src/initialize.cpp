@@ -32,7 +32,42 @@ ABSL_FLAG(std::uint16_t , local_port      , 7000        , "TCP port for communic
 
 namespace tDSM {
 
+static inline auto init_logging() {
+    logger->set_pattern("[%H:%M:%S] [%n] [thread %t] [%^%L%$] %v");
+
+    const auto level = std::getenv("LOGLEVEL");
+    if (level) {
+        switch(std::stol(level)) {
+            case 0:
+                logger->set_level(spdlog::level::off);
+                break;
+            case 1:
+                logger->set_level(spdlog::level::err);
+                break;
+            case 2:
+                logger->set_level(spdlog::level::warn);
+                break;
+            case 3:
+                logger->set_level(spdlog::level::info);
+                break;
+            case 4:
+                logger->set_level(spdlog::level::debug);
+                break;
+            case 5:
+                logger->set_level(spdlog::level::trace);
+                break;
+            default:
+                logger->set_level(spdlog::level::warn);
+        }
+    } else {
+        logger->set_level(spdlog::level::warn);
+    }
+}
+
+
 void initialize(const int argc, char* argv[]) {
+    init_logging();
+
     absl::SetProgramUsageMessage(fmt::format("Usage: {} master=<true/false> ip=<IP> port=<Port>\n", argv[0]));
 
     const auto args = absl::ParseCommandLine(argc, argv);

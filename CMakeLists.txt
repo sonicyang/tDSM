@@ -86,7 +86,6 @@ function(add_rdma_executable NAME)
     endif()
 endfunction()
 
-
 #file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS ${ARGN})
-add_rdma_executable(rdma src/demo.cpp src/initialize.cpp src/swapper.cpp src/logging.cpp src/rpc_adapter.cpp)
-add_rdma_executable(rdma2 src/demo2.cpp src/initialize.cpp src/swapper.cpp src/logging.cpp src/rpc_adapter.cpp)
+#add_rdma_executable(rdma src/demo.cpp src/initialize.cpp src/swapper.cpp src/logging.cpp src/rpc_adapter.cpp)
+add_rdma_executable(memtest src/memtest.cpp src/initialize.cpp src/swapper.cpp src/logging.cpp src/rpc_adapter.cpp)

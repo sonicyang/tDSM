@@ -200,14 +200,14 @@ class Node {
         const auto packet = message.data<packet::packet_header>();
         const auto type = packet->type;
 
-        spdlog::debug("Handling packet: {}", packet::packet_type_to_string(type));
+        logger->trace("Handling packet: {}", packet::packet_type_to_string(type));
 
 #define HANDLE(X) case packet::packet_type::X: err = forward_packet<packet::X##_packet>(sock, message, &Node::handle_##X); break
 
         switch (type) {
             case packet::packet_type::disconnect:
                 // No need to recv, socket is close by remote
-                spdlog::info("Peer disconnected!");
+                logger->trace("Peer disconnected!");
                 (void)forward_packet<packet::disconnect_packet>(sock, message, &Node::handle_disconnect);
                 ret = true;
                 break;
@@ -231,14 +231,14 @@ class Node {
 #undef HANDLE
 
         if (err) {
-            spdlog::error("Reading packet type {} cause an error!", packet::packet_type_to_string(type));
+            logger->error("Reading packet type {} cause an error!", packet::packet_type_to_string(type));
         }
         return ret;
     }
 
 #define HANDLER(X) \
     virtual bool handle_##X(zmq::socket_ref, const packet::X##_packet&) { \
-        spdlog::warn("Ignoring a X packet"); \
+        logger->warn("Ignoring a X packet"); \
         return OK; \
     }
 
@@ -317,7 +317,7 @@ class master_node : public Node {
 
     bool handle_connect(zmq::socket_ref, const packet::connect_packet& msg) final {
         const auto peer_id = number_of_peers.fetch_add(1);
-        spdlog::trace("Accepting new peer : ID: {}", peer_id);
+        logger->trace("Accepting new peer : ID: {}", peer_id);
 
         // One at a time, no race
         {
@@ -361,7 +361,7 @@ class master_node : public Node {
     std::unordered_map<std::uintptr_t, sem_state> sem_queues{};
 
     bool handle_sem_get(zmq::socket_ref, const packet::sem_get_packet& msg) final {
-        spdlog::trace("Queue sem get at 0x{:x} from ID: {}", msg.address, msg.hdr.from);
+        logger->trace("Queue sem get at 0x{:x} from ID: {}", msg.address, msg.hdr.from);
 
         {
             const auto nbytes = this->rpc_endpoint.send(packet::noop_packet{}, zmq::send_flags::none);
@@ -393,7 +393,7 @@ class master_node : public Node {
     }
 
     bool handle_sem_put(zmq::socket_ref, const packet::sem_put_packet& msg) final {
-        spdlog::trace("sem put at 0x{:x} from ID: {}", msg.address, msg.hdr.from);
+        logger->trace("sem put at 0x{:x} from ID: {}", msg.address, msg.hdr.from);
 
         {
             const auto nbytes = this->rpc_endpoint.send(packet::noop_packet{}, zmq::send_flags::none);
@@ -448,7 +448,7 @@ class peer_node : public Node {
         rendezvous->args.copy(args);
 
         // Send call msg
-        spdlog::debug("Call of RPC action {}, ID {} {}", action, call_id, args.size());
+        logger->debug("Call of RPC action {}, ID {} {}", action, call_id, args.size());
         {
             std::scoped_lock<std::mutex> lk(this->pub_endpoint_mutex);
             const auto flags = args.size() != 0 ? zmq::send_flags::sndmore : zmq::send_flags::none;
@@ -463,7 +463,7 @@ class peer_node : public Node {
         rendezvous->called.store(true, std::memory_order_release);
 
         // wait for result
-        spdlog::debug("Wait return of RPC action {}, ID {}", action, call_id);
+        logger->debug("Wait return of RPC action {}, ID {}", action, call_id);
         rendezvous->sem.acquire();
         auto ret = std::move(rendezvous->ret);
 
@@ -534,7 +534,7 @@ class peer_node : public Node {
         const auto local_pub_uri = fmt::format("tcp://*:{}", my_port_);
         pub_endpoint.bind(local_pub_uri);
 
-        spdlog::info("Connecting to directory {}:{}", directory_addr, directory_rpc_port);
+        logger->info("Connecting to directory {}:{}", directory_addr, directory_rpc_port);
 
         const auto directory_sub_uri = fmt::format("tcp://{}:{}", directory_addr, directory_pub_port);
         directory_sub_endpoint.connect(directory_sub_uri);
@@ -560,13 +560,13 @@ class peer_node : public Node {
 
             this->my_id = msg->peer_id;
             packet::my_id = this->my_id;
-            spdlog::trace("My ID is assigned as {}", this->my_id);
+            logger->trace("My ID is assigned as {}", this->my_id);
 
             assert(tDSM::packet::my_id != 0);
 
             use_compression = msg->use_compression;
             if (use_compression) {
-                spdlog::trace("Compression enabled");
+                logger->trace("Compression enabled");
             }
         }
 
@@ -610,7 +610,7 @@ class peer_node : public Node {
             std::uint64_t expire_count;
             const auto nbytes = ::read(this->timeout_timer_fd.get(), &expire_count, sizeof(expire_count));
             if (nbytes != sizeof(expire_count)) {
-                spdlog::error("Reading from timer fd failed! : {}", strerror(errno));
+                logger->error("Reading from timer fd failed! : {}", strerror(errno));
                 continue;
             }
 
@@ -635,7 +635,7 @@ class peer_node : public Node {
             return OK;
         }
 
-        spdlog::info("Registering and subscribing to a new peer : {}:{}", msg.addr, msg.port);
+        logger->info("Registering and subscribing to a new peer : {}:{}", msg.addr, msg.port);
 
         zmq::socket_t sub_endpoint(Context::get().zmq_ctx, zmq::socket_type::sub);
         const auto sub_uri = fmt::format("tcp://{}:{}", msg.addr, msg.port);
@@ -645,7 +645,7 @@ class peer_node : public Node {
         //packet::subscribe_to_id(sub_endpoint, 0);
         //packet::subscribe_to_id(sub_endpoint, this->my_id);
 
-        spdlog::trace("New peer {} at {}:{} subscribed!", msg.peer_id, msg.addr, msg.port);
+        logger->trace("New peer {} at {}:{} subscribed!", msg.peer_id, msg.addr, msg.port);
 
         // Add to list of peers
         this->peers.add(msg.peer_id, std::move(sub_endpoint), msg.addr, msg.port);
@@ -702,7 +702,7 @@ class peer_node : public Node {
                 break;
             }
 
-            spdlog::debug("Run RPC ID {} for remote {}/{}", req.action, req.remote, req.call_id);
+            logger->debug("Run RPC ID {} for remote {}/{}", req.action, req.remote, req.call_id);
 
             // Call dispatcher -> proxy
             auto ret = rpc::dispatch_rpc(req.action, req.args);
@@ -741,12 +741,12 @@ class peer_node : public Node {
         if (msg.size > 0) {
             const auto nbytes = sock.recv(req.args, zmq::recv_flags::none);
             if (nbytes != msg.size) {
-                spdlog::error("Error on receive ret");
+                logger->error("Error on receive ret");
                 return has_error;
             }
         }
 
-        spdlog::debug("Enqueue RPC action {} for remote {}/{}", req.action, req.remote, req.call_id);
+        logger->debug("Enqueue RPC action {} for remote {}/{}", req.action, req.remote, req.call_id);
         this->rpc_request_queue.emplace_back(std::move(req));
 
         this->rpc_queue_condvar.notify_one();
@@ -773,7 +773,7 @@ class peer_node : public Node {
     bool handle_ret(zmq::socket_ref sock, const packet::ret_packet& msg) final {
         std::unique_lock<std::mutex> lk(this->outstanding_rpcs_mutex);
         if (!this->outstanding_rpcs.contains(msg.call_id)) {
-            spdlog::warn("Return for RPC ID {} read multiple times!", msg.call_id);
+            logger->warn("Return for RPC ID {} read multiple times!", msg.call_id);
             return has_error;
         }
 
@@ -785,12 +785,12 @@ class peer_node : public Node {
         if (msg.size > 0) {
             const auto nbytes = sock.recv(rendezvous->ret, zmq::recv_flags::none);
             if (nbytes != msg.size) {
-                spdlog::error("Error on receive ret");
+                logger->error("Error on receive ret");
                 return has_error;
             }
         }
 
-        spdlog::debug("Return of RPC ID {}", msg.call_id);
+        logger->debug("Return of RPC ID {}", msg.call_id);
         // Let the original thread continue
         rendezvous->sem.release();
 
