@@ -52,7 +52,7 @@ struct rpc_adapter_base {
             std::memcpy(ptr, &arg, sizeof(arg));
             ptr += sizeof(arg);
         };
-        (encoder(args), ...);
+        (..., encoder(args));
 
         const auto ret_msg = swapper::get().call(action, this->remote, std::move(send_buffer));
 
@@ -75,11 +75,14 @@ struct rpc_adapter_base {
             return ret;
         };
 
+        // Brace-initializer force the order of evaluation
+        const auto decoded_args = std::tuple{arg_decoder.template operator()<arg_types>()...};
+
         if constexpr (std::is_void_v<return_type>) {
-            func(arg_decoder.template operator()<arg_types>()...);
+            std::apply(func, decoded_args);
             return zmq::message_t{};
         } else {
-            const auto ret = func(arg_decoder.template operator()<arg_types>()...);
+            const auto ret = std::apply(func, decoded_args);
 
             zmq::message_t encoded_ret(sizeof(ret));
             std::memcpy(encoded_ret.data(), &ret, sizeof(ret));
@@ -123,6 +126,7 @@ struct static_rpc_adapter : rpc_adapter_base {
 
     static inline return_type proxy_no_ref(justify_arg_type<arg_types>... args) {
         // Convert the reference types back from pointer types, otherwise there will be a signature mismatch with original function
+        (logger->warn("{}", args), ...);
         return proxy(unjustify_arg<arg_types>(args)...);
     }
 
@@ -131,6 +135,7 @@ struct static_rpc_adapter : rpc_adapter_base {
 
     inline return_type stub_no_ref(justify_arg_type<arg_types>... args) {
         // Call the RPC
+        (logger->warn("{}", args), ...);
         return common_stub<return_type>(common_proxy_alias_address, args...);
     }
 
