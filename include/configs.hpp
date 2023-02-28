@@ -63,6 +63,6 @@ auto inline get_frame_address(const std::size_t frame_id, const void* rdma_base 
 
 namespace tDSM {
 
-void initialize(const int argc, char* argv[]);
+void initialize();
 
 }  // namespace tDSM

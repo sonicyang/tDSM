@@ -15,20 +15,10 @@
 
 #include <string>
 
-#include "absl/flags/flag.h"
-#include "absl/flags/parse.h"
-#include "absl/flags/usage.h"
 #include "fmt/core.h"
 
 #include "node.hpp"
 #include "swapper.hpp"
-
-ABSL_FLAG(bool          , directory       , false       , "Is directory node");
-ABSL_FLAG(bool          , compression     , false       , "Use lz4 compression");
-ABSL_FLAG(bool          , rpc_server_only , false       , "Act as a rpc server only");
-ABSL_FLAG(std::string   , directory_addr  , "127.0.0.1" , "IP address of directory");
-ABSL_FLAG(std::string   , local_addr      , "127.0.0.1" , "IP address of this node");
-ABSL_FLAG(std::uint16_t , local_port      , 7000        , "TCP port for communication");
 
 namespace tDSM {
 
@@ -64,28 +54,44 @@ static inline auto init_logging() {
     }
 }
 
+template<typename T>
+static inline T getenv_or_default(const char* env, const T def) {
+    const auto var = std::getenv(env);
+    if (var) {
+        if constexpr (std::is_same_v<bool, T>) {
+            return !!(std::stol(var));
+        } else if constexpr (std::is_same_v<std::string, T>) {
+        } else if constexpr (std::is_unsigned_v<T>) {
+            return static_cast<T>(std::stoul(var));
+        } else if constexpr (std::is_integral_v<T>) {
+            return static_cast<T>(std::stol(var));
+        } else {
+            return def;
+        }
+    } else {
+        return def;
+    }
+}
 
-void initialize(const int argc, char* argv[]) {
+void initialize() {
     init_logging();
 
-    absl::SetProgramUsageMessage(fmt::format("Usage: {} master=<true/false> ip=<IP> port=<Port>\n", argv[0]));
-
-    const auto args = absl::ParseCommandLine(argc, argv);
+    const auto is_directory   = getenv_or_default("DIRECTORY", false);
+    const auto compression    = getenv_or_default("COMPRESSION", true);
+    const auto rpc_server     = getenv_or_default("RPC_SERVER", false);
+    const auto directory_addr = getenv_or_default("DIRECTORY_ADDRESS", "localhost");
+    const auto local_addr     = getenv_or_default("ADDRESS", "localhost");
+    const auto local_port     = getenv_or_default("PORT", std::uint16_t{7000});
 
     // Make sure the directory service is started first
-    const auto is_master = absl::GetFlag(FLAGS_directory);
-    if (is_master) {
-        const auto use_compression = absl::GetFlag(FLAGS_compression);
-        master_node::get().initialize(use_compression);
+    if (is_directory) {
+        master_node::get().initialize(compression);
     }
 
     // First call, initialized!
-    const auto directory_addr = absl::GetFlag(FLAGS_directory_addr);
-    const auto local_addr = absl::GetFlag(FLAGS_local_addr);
-    const auto local_port = absl::GetFlag(FLAGS_local_port);
-    swapper::get().initialize(is_master, directory_addr, local_addr, local_port);
+    swapper::get().initialize(is_directory, directory_addr, local_addr, local_port);
 
-    if (absl::GetFlag(FLAGS_rpc_server_only)) {
+    if (rpc_server) {
         while(true) {
             sleep(86400);  // Temp solution to make main stuck
         }

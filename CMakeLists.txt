@@ -25,7 +25,6 @@ add_subdirectory(3rdparty/cppzmq)
 add_subdirectory(3rdparty/lz4/build/cmake)
 add_subdirectory(3rdparty/fmt)
 add_subdirectory(3rdparty/spdlog)
-add_subdirectory(3rdparty/abseil-cpp)
 
 add_compile_definitions(ZMQ_BUILD_DRAFT_API)
 
@@ -37,9 +36,6 @@ function(add_rdma_executable NAME)
     target_link_libraries(${NAME} PRIVATE 
         fmt
         spdlog::spdlog
-        absl::flags
-        absl::flags_parse
-        absl::flags_usage
         lz4_static
         cppzmq
     )
@@ -71,8 +67,6 @@ function(add_rdma_executable NAME)
         # STFU
         target_compile_options(${NAME} PUBLIC -Wno-weak-vtables)
 
-        # ABSL need This
-        target_compile_options(${NAME} PUBLIC -Wno-reserved-identifier)
         # lz4 need this
         target_compile_options(${NAME} PUBLIC -Wno-old-style-cast)
         # fmt need this
