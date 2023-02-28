@@ -126,7 +126,6 @@ struct static_rpc_adapter : rpc_adapter_base {
 
     static inline return_type proxy_no_ref(justify_arg_type<arg_types>... args) {
         // Convert the reference types back from pointer types, otherwise there will be a signature mismatch with original function
-        (logger->warn("{}", args), ...);
         return proxy(unjustify_arg<arg_types>(args)...);
     }
 
@@ -135,7 +134,6 @@ struct static_rpc_adapter : rpc_adapter_base {
 
     inline return_type stub_no_ref(justify_arg_type<arg_types>... args) {
         // Call the RPC
-        (logger->warn("{}", args), ...);
         return common_stub<return_type>(common_proxy_alias_address, args...);
     }
 
