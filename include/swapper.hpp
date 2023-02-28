@@ -83,7 +83,9 @@ class swapper : public peer_node {
             if (!this->sem_list.contains(address)) {
                 lk.unlock();
                 std::unique_lock<std::shared_mutex> lk2(this->sem_list_mutex);
-                this->sem_list[address] = std::make_unique<sem_semaphore>(0);
+                if (!this->sem_list.contains(address)) {
+                    this->sem_list[address] = std::make_unique<sem_semaphore>(0);
+                }
                 return this->sem_list[address];
             }
 
@@ -590,7 +592,9 @@ class swapper : public peer_node {
             if (!this->sem_list.contains(msg.address)) {
                 lk.unlock();
                 std::unique_lock<std::shared_mutex> lk2(this->sem_list_mutex);
-                this->sem_list[msg.address] = std::make_unique<sem_semaphore>(0);
+                if (!this->sem_list.contains(msg.address)) {
+                    this->sem_list[msg.address] = std::make_unique<sem_semaphore>(0);
+                }
                 return this->sem_list[msg.address];
             }
 
