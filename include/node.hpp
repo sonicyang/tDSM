@@ -180,8 +180,11 @@ class Node {
             }
         }
 
-        // Don't care even this failed
-        (void)sock.send(packet::disconnect_packet{}, zmq::send_flags::none);
+        // Don't care even this failed, the socket might be a pub-sub pair
+        try {
+            (void)sock.send(packet::disconnect_packet{}, zmq::send_flags::none);
+        } catch(zmq::error_t&) {
+        }
 
         poller.remove(sock);
         poller.remove_fd(this_thread.evtfd.get());
@@ -499,6 +502,7 @@ class peer_node : public Node {
             for (auto& thread : this->rpc_thread_pool) {
                 (void)thread;
                 this->rpc_request_queue.emplace_back(rpc_request{true, 0, 0, 0, zmq::message_t{}});
+                this->rpc_queue_condvar.notify_one();
             }
         }
         for (auto& thread : this->rpc_thread_pool) {
