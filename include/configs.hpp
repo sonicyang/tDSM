@@ -47,7 +47,7 @@ auto inline get_frame_number(void* const addr) {
         !(base <= uaddr && uaddr < base + rdma_size),
         "The address is out-of-bound!"
     );
-    return  (uaddr - base) / n_pages;
+    return  (uaddr - base) / page_size;
 }
 
 auto inline get_frame_address(const std::size_t frame_id, const void* rdma_base = rdma_memory) {
