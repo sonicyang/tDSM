@@ -14,6 +14,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <chrono>
@@ -151,6 +152,8 @@ class Node {
     static constexpr auto OK = false;
 
  protected:
+    id_t my_id{};
+
     // Receiving
     inline void handle(zmq::socket_ref sock, utils::cancelable_thread& this_thread) {
         zmq::poller_t<> poller;
@@ -202,8 +205,29 @@ class Node {
 
         const auto packet = message.data<packet::packet_header>();
         const auto type = packet->type;
+        const auto to = packet->to;
+        const auto from = packet->from;
 
-        logger->trace("Handling packet: {}", packet::packet_type_to_string(type));
+        if (type >= packet::packet_type::max_types) {
+            logger->debug("Unknown packet type {}", static_cast<std::uint32_t>(type));
+            return ret;
+        }
+
+        logger->debug("Handling packet: {} from {} to {}", packet::packet_type_to_string(type), from, to);
+
+        if (to != this->my_id && to != 0) {
+            logger->debug("Not packet for me, discarding {} from {} to {}", packet::packet_type_to_string(type), from, to);
+            if (message.more()) {
+                zmq::message_t more_msg;
+                do {
+                    const auto nbyte = sock.recv(more_msg, zmq::recv_flags::none);
+                    if (!nbyte.has_value()) {
+                        break;
+                    }
+                } while (more_msg.more());
+            }
+            return ret;
+        }
 
 #define HANDLE(X) case packet::packet_type::X: err = forward_packet<packet::X##_packet>(sock, message, &Node::handle_##X); break
 
@@ -229,12 +253,14 @@ class Node {
             HANDLE(ret);
             HANDLE(call_ack);
             HANDLE(ret_ack);
+            case packet::packet_type::max_types:
+                break;  // Should never happen
         }
 
 #undef HANDLE
 
         if (err) {
-            logger->error("Reading packet type {} cause an error!", packet::packet_type_to_string(type));
+            logger->error("Reading packet type {} from {} to {} cause an error!", packet::packet_type_to_string(type), from, to);
         }
         return ret;
     }
@@ -452,16 +478,8 @@ class peer_node : public Node {
 
         // Send call msg
         logger->debug("Call of RPC action {}, ID {} {}", action, call_id, args.size());
-        {
-            std::scoped_lock<std::mutex> lk(this->pub_endpoint_mutex);
-            const auto flags = args.size() != 0 ? zmq::send_flags::sndmore : zmq::send_flags::none;
-            const auto nbytes = this->pub_endpoint.send(packet::call_packet{ .call_id = call_id, .action = action, .size = args.size() }.to(remote), flags).value();
-            if (!(nbytes != sizeof(packet::call_packet)) && args.size() != 0) {
-                // Destination id followed the header above
-               (void)this->pub_endpoint.send(args, zmq::send_flags::none);
-            }
-        }
-        // transmission error handled by timeout
+        // Error handled by timeout
+        (void)this->atomic_pub_send(packet::call_packet{ .call_id = call_id, .action = action, .size = args.size() }.to(remote), args);
 
         rendezvous->called.store(true, std::memory_order_release);
 
@@ -490,11 +508,7 @@ class peer_node : public Node {
                 const auto nbytes = this->directory_rpc_endpoint.send(packet::disconnect_packet{}, zmq::send_flags::none);
                 tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::disconnect_packet), "Failed to disconnect from directory");
             }
-            {
-                std::scoped_lock<std::mutex> lk(this->pub_endpoint_mutex);
-                const auto nbytes = this->pub_endpoint.send(packet::disconnect_packet{}, zmq::send_flags::none);
-                tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::disconnect_packet), "Failed to publish disconnect");
-            }
+            this->atomic_pub_send(packet::disconnect_packet{});
         }
 
         {
@@ -516,7 +530,6 @@ class peer_node : public Node {
     peer_node& operator=(peer_node&&) = delete;
 
     details::peers peers{};
-    id_t my_id{};
     std::string directory_addr;
     std::string my_addr;
     std::uint16_t my_port;
@@ -527,6 +540,36 @@ class peer_node : public Node {
     zmq::socket_t directory_sub_endpoint = zmq::socket_t(Context::get().zmq_ctx, zmq::socket_type::sub);
     zmq::socket_t directory_rpc_endpoint = zmq::socket_t(Context::get().zmq_ctx, zmq::socket_type::req);
     utils::cancelable_thread directory_sub_thread{};
+
+    inline bool atomic_pub_send(const zmq::const_buffer& msg) {
+        std::scoped_lock<std::mutex> lk(this->pub_endpoint_mutex);
+        const auto nbytes = this->pub_endpoint.send(msg, zmq::send_flags::none);
+        return nbytes != msg.size();
+    }
+
+    inline bool atomic_pub_send(const zmq::const_buffer& msg, zmq::message_t& payload) {
+        std::scoped_lock<std::mutex> lk(this->pub_endpoint_mutex);
+        const auto flags = payload.size() != 0 ? zmq::send_flags::sndmore : zmq::send_flags::none;
+        const auto nbytes = this->pub_endpoint.send(msg, flags);
+        if (!(nbytes != msg.size()) && payload.size() != 0) {
+            // Destination id followed the header above
+            const auto payloadbytes = this->pub_endpoint.send(payload, zmq::send_flags::none).value();
+            return payloadbytes != payload.size();
+        }
+        return true;
+    }
+
+    inline bool atomic_pub_send(const zmq::const_buffer& msg, const zmq::const_buffer& payload) {
+        std::scoped_lock<std::mutex> lk(this->pub_endpoint_mutex);
+        const auto flags = payload.size() != 0 ? zmq::send_flags::sndmore : zmq::send_flags::none;
+        const auto nbytes = this->pub_endpoint.send(msg, flags);
+        if (!(nbytes != msg.size()) && payload.size() != 0) {
+            // Destination id followed the header above
+            const auto payloadbytes = this->pub_endpoint.send(payload, zmq::send_flags::none).value();
+            return payloadbytes != payload.size();
+        }
+        return true;
+    }
 
     inline auto initialize(const std::string& directory_addr_, const std::string& my_addr_, const std::uint16_t my_port_) {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(initialized, "Cannot initialize twice");
@@ -714,16 +757,8 @@ class peer_node : public Node {
             ret_clone.copy(ret);
 
             // Send return
-            {
-                std::scoped_lock<std::mutex> lk2(this->pub_endpoint_mutex);
-                const auto flags = ret.size() != 0 ? zmq::send_flags::sndmore : zmq::send_flags::none;
-                const auto nbytes = this->pub_endpoint.send(packet::ret_packet{ .call_id = req.call_id, .size = ret.size() }.to(req.remote), flags);
-                if (!(nbytes != sizeof(packet::ret_packet)) && ret.size() != 0) {
-                    // Destination id followed the header above
-                    (void)this->pub_endpoint.send(ret, zmq::send_flags::none).value();
-                    // Further error handled by timeout
-                }
-            }
+            // Further error handled by timeout
+            (void)this->atomic_pub_send(packet::ret_packet{ .call_id = req.call_id, .size = ret.size() }.to(req.remote), ret);
 
             std::scoped_lock<std::mutex> lk2(this->outstanding_rpc_rets_mutex);  // prevent deletion
             this->outstanding_rpc_rets[req.remote][req.call_id] = std::move(ret_clone);
@@ -755,12 +790,7 @@ class peer_node : public Node {
 
         this->rpc_queue_condvar.notify_one();
 
-        const auto nbytes = this->pub_endpoint.send(packet::call_ack_packet{ .call_id = msg.call_id }.to(msg.hdr.from), zmq::send_flags::none);
-        if (nbytes != sizeof(packet::call_ack_packet)) {
-            return has_error;
-        }
-
-        return OK;
+        return this->atomic_pub_send(packet::call_ack_packet{ .call_id = msg.call_id }.to(msg.hdr.from));
     }
 
     bool handle_call_ack(zmq::socket_ref, const packet::call_ack_packet& msg) final {
@@ -798,12 +828,7 @@ class peer_node : public Node {
         // Let the original thread continue
         rendezvous->sem.release();
 
-        const auto nbytes = this->pub_endpoint.send(packet::ret_ack_packet{ .call_id = msg.call_id }.to(msg.hdr.from), zmq::send_flags::none);
-        if (nbytes != sizeof(packet::call_ack_packet)) {
-            return has_error;
-        }
-
-        return OK;
+        return this->atomic_pub_send(packet::ret_ack_packet{ .call_id = msg.call_id }.to(msg.hdr.from));
     }
 
     bool handle_ret_ack(zmq::socket_ref, const packet::ret_ack_packet& msg) final {
@@ -821,14 +846,9 @@ class peer_node : public Node {
         std::scoped_lock<std::mutex> lk(this->outstanding_rpcs_mutex);  // prevent deletion and insertion
         for (auto& [id, rendezvous] : this->outstanding_rpcs) {
             if (!rendezvous->ack && rendezvous->called) {
-                std::scoped_lock<std::mutex> lk2(this->pub_endpoint_mutex);
-                const auto flags = rendezvous->args.size() != 0 ? zmq::send_flags::sndmore : zmq::send_flags::none;
-                const auto nbytes = this->pub_endpoint.send(packet::call_packet{ .call_id = rendezvous->call_id, .action = rendezvous->action, .size = rendezvous->args.size() }.to(rendezvous->remote), flags).value();
-                if (!(nbytes != sizeof(packet::call_packet)) && rendezvous->args.size() != 0) {
-                    // Destination id followed the header above
-                   (void)this->pub_endpoint.send(rendezvous->args, zmq::send_flags::none).value();
-                   // Further error handled by timeout
-                }
+                zmq::message_t clone;
+                clone.copy(rendezvous->args);
+                (void)this->atomic_pub_send(packet::call_packet{ .call_id = rendezvous->call_id, .action = rendezvous->action, .size = rendezvous->args.size() }.to(rendezvous->remote), clone);
             }
         }
     }
@@ -838,14 +858,9 @@ class peer_node : public Node {
 
         for (auto& [remote_id, list_of_rets] : this->outstanding_rpc_rets) {
             for (auto& [id, ret] : list_of_rets) {
-                std::scoped_lock<std::mutex> lk2(this->pub_endpoint_mutex);
-                const auto flags = ret.size() != 0 ? zmq::send_flags::sndmore : zmq::send_flags::none;
-                const auto nbytes = this->pub_endpoint.send(packet::ret_packet{ .call_id = id, .size = ret.size() }.to(remote_id), flags);
-                if (!(nbytes != sizeof(packet::ret_packet)) && ret.size() != 0) {
-                    // Destination id followed the header above
-                    (void)this->pub_endpoint.send(ret, zmq::send_flags::none).value();
-                    // Further error handled by timeout
-                }
+                zmq::message_t clone;
+                clone.copy(ret);
+                (void)this->atomic_pub_send(packet::ret_packet{ .call_id = id, .size = ret.size() }.to(remote_id), clone);
             }
         }
     }

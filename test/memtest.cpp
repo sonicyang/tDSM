@@ -88,8 +88,8 @@ int main() {
     tDSM::initialize();
     auto& swapper = tDSM::swapper::get();
 
-    constexpr auto testers = 2;
-    constexpr auto iter = 4096;
+    constexpr auto testers = 3;
+    constexpr auto iter = 65535;
 
     barrier_init();
 
@@ -109,6 +109,8 @@ int main() {
     for (auto& t : threads) {
         t.join();
     }
+
+    spdlog::info("OK");
 
     return 0;
 }

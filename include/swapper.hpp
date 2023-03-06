@@ -249,7 +249,7 @@ class swapper : public peer_node {
             this->out_standing_read[frame_id] = true;
         }
 
-        this->pub_endpoint.send(packet::ask_page_packet{ .frame_id = frame_id });
+        (void)this->atomic_pub_send(packet::ask_page_packet{ .frame_id = frame_id });
     }
 
     inline auto own_page(const frame_id_t frame_id) {
@@ -261,7 +261,7 @@ class swapper : public peer_node {
             this->out_standing_write[frame_id] = true;
         }
 
-        this->pub_endpoint.send(packet::my_page_packet{ .frame_id = frame_id });
+        (void)this->atomic_pub_send(packet::my_page_packet{ .frame_id = frame_id });
     }
 
     inline auto page_out_page(const frame_id_t frame_id) {
@@ -309,26 +309,22 @@ class swapper : public peer_node {
 
                 size_to_send = static_cast<std::size_t>(LZ4_compress_default(reinterpret_cast<char*>(rw_address), reinterpret_cast<char*>(compressed), page_size, data_max_size));
                 tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-                    size_to_send == 0, "Failed to compress page data"
+                    size_to_send == 0, "Failed to compress frame data"
                 );
 
                 logger->trace("Compression {} to {}, {}%", page_size, size_to_send, static_cast<double>(page_size - size_to_send) / page_size * 100);
             }
 
-            std::scoped_lock<std::mutex> lk(this->pub_endpoint_mutex);
-            const auto flags = size_to_send != 0 ? zmq::send_flags::sndmore : zmq::send_flags::dontwait;
-            auto nbytes = this->pub_endpoint.send(packet::send_page_packet{ .frame_id = frame_id, .size = size_to_send }.to(peer_id), flags).value();
-            if (size_to_send != 0) {
-                // Destination id followed the header above
-                nbytes  += this->pub_endpoint.send(zmq::const_buffer(ptr_to_send, size_to_send), zmq::send_flags::dontwait).value();
-            }
-
-            if (nbytes < sizeof(packet::send_page_packet) + size_to_send) {
-                logger->error("Failed send a page");
+            if (this->atomic_pub_send(packet::send_page_packet{ .frame_id = frame_id, .size = size_to_send }.to(peer_id), zmq::const_buffer(ptr_to_send, size_to_send))) {
+                logger->error("Failed send a frame");
                 // timeout will handle the rest and a retransmission should happen
             }
         } else {
             // node with shared or invalid state do nothing
+            if (this->atomic_pub_send(packet::send_page_packet{ .frame_id = frame_id, .size = 0 }.to(peer_id))) {
+                logger->error("Failed send a dummy frame");
+                // timeout will handle the rest and a retransmission should happen
+            }
         }
         return false;
     }
@@ -338,7 +334,7 @@ class swapper : public peer_node {
         const auto peer_id  = msg.hdr.from;
         const auto frame_id = msg.frame_id;
 
-        logger->debug("{} sent page {}", peer_id, frame_id);
+        logger->debug("{} sent frame {}", peer_id, frame_id);
 
         constexpr auto data_max_size = LZ4_COMPRESSBOUND(page_size);
 
@@ -358,7 +354,7 @@ class swapper : public peer_node {
 
                 const auto nbytes = sock.recv(zmq::mutable_buffer(address_to_write, msg.size), zmq::recv_flags::none);
                 if (!nbytes.has_value() || nbytes.value().size != msg.size) {
-                    logger->error("Error on receive page");
+                    logger->error("Error on receive frame");
                     return has_error;
                 }
 
@@ -386,7 +382,7 @@ class swapper : public peer_node {
 
             const auto nbytes = sock.recv(zmq::mutable_buffer(dummy, msg.size), zmq::recv_flags::none);
             if (!nbytes.has_value() || nbytes.value().size != msg.size) {
-                logger->error("Error on receive page");
+                logger->error("Error on receive frame");
                 return has_error;
             }
         }
@@ -399,7 +395,7 @@ class swapper : public peer_node {
         const auto peer_id  = msg.hdr.from;
         const auto frame_id = msg.frame_id;
 
-        logger->debug("{} take ownership of page {}", peer_id, frame_id);
+        logger->debug("{} take ownership of frame {}", peer_id, frame_id);
 
         {
             std::scoped_lock<std::mutex> lk{this->read_fencing_mutex[frame_id]};
@@ -415,8 +411,7 @@ class swapper : public peer_node {
         if (this->out_standing_write[frame_id] && peer_id > this->my_id) {
             // Oh oh, we are competing with some other peers
             // We have priority, ignore the request, tell them WE OWN THE PAGE!!
-            const auto nbytes = this->pub_endpoint.send(packet::my_page_packet{ .frame_id = msg.frame_id });
-            if (nbytes != sizeof(packet::my_page_packet)) {
+            if (this->atomic_pub_send(packet::my_page_packet{ .frame_id = msg.frame_id })) {
                 logger->error("Error to notify ownership of frame : {}", frame_id);
                 return has_error;
             }
@@ -428,8 +423,7 @@ class swapper : public peer_node {
             this->faultfd.write_protect(base_address, page_size);
             this->page_out_page(msg.frame_id);
 
-            const auto nbytes = this->pub_endpoint.send(packet::your_page_packet{ .frame_id = msg.frame_id }.to(peer_id));
-            if (nbytes != sizeof(packet::your_page_packet)) {
+            if (this->atomic_pub_send(packet::your_page_packet{ .frame_id = msg.frame_id }.to(peer_id))) {
                 logger->error("Error to handout ownership of frame : {}", frame_id);
                 return has_error;
             }
@@ -451,7 +445,7 @@ class swapper : public peer_node {
         const auto peer_id  = msg.hdr.from;
         const auto frame_id = msg.frame_id;
 
-        logger->debug("{} give ownership of page {}", peer_id, frame_id);
+        logger->debug("{} give ownership of frame {}", peer_id, frame_id);
 
         std::scoped_lock<std::mutex> lk{this->write_fencing_mutex[frame_id]};
         this->write_fencing_set[frame_id].emplace(peer_id);
@@ -500,7 +494,7 @@ class swapper : public peer_node {
                 zmq::message_t message;
                 const auto nbytes = event.socket.recv(message, zmq::recv_flags::none);
                 if (nbytes < sizeof(packet::packet_header)) {
-                    logger->error("Received invalid packet");
+                    logger->error("Received invalid packet. size {}", nbytes.value());
                     continue;
                 }
 
@@ -542,7 +536,7 @@ class swapper : public peer_node {
                     this->ask_page(frame_id);  // Download the data from the owner, can timeout or fail during owner ship transition
                     // continue after we receive a SEND_PAGE packet
                 } else if (current_state == state::shared || current_state == state::shared_had_owned_page) {
-                    tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(!fault.is_write, "A shared page trigger a fault, which is not a write");
+                    tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(!fault.is_write, "A shared frame trigger a fault, which is not a write");
                     // Take ownership
                     this->own_page(frame_id);
 
@@ -555,7 +549,7 @@ class swapper : public peer_node {
                         this->faultfd.continue_(base_address, page_size);
                         this->faultfd.wake(base_address, page_size);
                     } else {
-                        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(true, "A exclusive page trigger a fault");
+                        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(true, "A exclusive frame trigger a fault");
                     }
                 }
             }
@@ -571,8 +565,8 @@ class swapper : public peer_node {
             {
                 std::scoped_lock<std::mutex> lk{this->read_fencing_mutex[frame_id]};
                 if (this->out_standing_read[frame_id] == true) {
-                    logger->debug("Timeout, asking frame {} again {} {}", frame_id, packet::my_id, packet::ask_page_packet{ .frame_id = frame_id }.hdr.from);
-                    this->pub_endpoint.send(packet::ask_page_packet{ .frame_id = frame_id });
+                    logger->debug("Timeout, asking frame {} again {}", frame_id, packet::my_id);
+                    (void)this->atomic_pub_send(packet::ask_page_packet{ .frame_id = frame_id });
                 }
             }
         }
@@ -584,7 +578,7 @@ class swapper : public peer_node {
                 std::scoped_lock<std::mutex> lk{this->write_fencing_mutex[frame_id]};
                 if (this->out_standing_write[frame_id] == true) {
                     logger->debug("Timeout, taking ownership of frame {} again", frame_id);
-                    this->pub_endpoint.send(packet::my_page_packet{ .frame_id = frame_id });
+                    (void)this->atomic_pub_send(packet::my_page_packet{ .frame_id = frame_id });
                 }
             }
         }

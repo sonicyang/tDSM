@@ -59,7 +59,8 @@ namespace tDSM::packet {
         call,
         call_ack,
         ret,
-        ret_ack
+        ret_ack,
+        max_types
     );
 
     struct packet_header {
@@ -137,7 +138,7 @@ namespace tDSM::packet {
     );
 
     static inline auto subscribe_to_id(auto& sock, const std::size_t id) {
-        char id_char[sizeof(id)];
+        std::uint8_t id_char[sizeof(id)];
         std::memcpy(id_char, &id, sizeof(id));
         sock.set(zmq::sockopt::subscribe, zmq::const_buffer(id_char, sizeof(id_char)));
     }
