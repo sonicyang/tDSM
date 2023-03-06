@@ -97,3 +97,4 @@ create_tdsm_library()
 
 add_rdma_executable(demo test/demo.cpp)
 add_rdma_executable(memtest test/memtest.cpp)
+add_rdma_executable(vector_add test/vector_add.cpp)
