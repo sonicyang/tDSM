@@ -117,10 +117,6 @@ class swapper : public peer_node {
         this->peers.wait_for_peer(peer_id);
     }
 
-    inline auto get_id() const {
-        return this->my_id;
-    }
-
     inline auto initialize(const bool is_master, const std::string& directory_addr_, const std::string& my_addr_, const std::uint16_t my_port_) {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(initialized, "Cannot initialize twice");
 

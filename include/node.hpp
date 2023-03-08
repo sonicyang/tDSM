@@ -151,6 +151,10 @@ class Node {
     static constexpr auto has_error = true;
     static constexpr auto OK = false;
 
+    inline auto get_id() const {
+        return this->my_id;
+    }
+
  protected:
     id_t my_id{};
 
