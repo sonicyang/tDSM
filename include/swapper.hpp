@@ -60,7 +60,29 @@ class swapper : public peer_node {
     }
 
     inline auto size() const {
-        return rdma_size;
+        return static_cast<std::size_t>(rdma_size);
+    }
+
+    inline auto make_sem(const std::size_t initial_count) {
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
+            this->directory_rpc_endpoint.send(packet::make_sem_packet{ .initial_count = initial_count }) != sizeof(packet::make_sem_packet),
+            "Failed to make a new semaphore"
+        );
+
+        zmq::message_t message;
+        const auto nbytes = this->directory_rpc_endpoint.recv(message, zmq::recv_flags::none);
+        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
+            nbytes != sizeof(packet::new_sem_packet),
+            "Failed recv new_sem_packet"
+        );
+
+        const auto msg = message.data<packet::new_sem_packet>();
+
+        // Must be first touch
+        std::unique_lock<std::shared_mutex> lk(this->sem_list_mutex);
+        this->sem_list[msg->address] = std::make_unique<sem_semaphore>(0);
+
+        return msg->address;
     }
 
     inline auto sem_get(const std::uintptr_t address) {
@@ -462,7 +484,6 @@ class swapper : public peer_node {
     // Actual worker thread function
     inline void run() {
         auto& poller = this->peers.get_poller();
-        //poller.add(this->directory_rpc_endpoint, zmq::event_flags::pollin);
         poller.add_fd(this->faultfd.get(), zmq::event_flags::pollin);
         poller.add_fd(this->thread.evtfd.get(), zmq::event_flags::pollin);
 

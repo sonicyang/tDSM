@@ -18,58 +18,23 @@
 #include <spdlog/spdlog.h>
 #include <cstdint>
 
+#include "allocator.hpp"
+#include "barrier.hpp"
 #include "configs.hpp"
 #include "node.hpp"
 #include "swapper.hpp"
 #include "rpc_adapter.hpp"
 
-static inline auto barrier_init() {
-    auto& swapper = tDSM::swapper::get();
-    const auto memory = swapper.memory();
-    static const auto mutex = reinterpret_cast<std::uintptr_t>(&memory[0]);
-    static const auto count = reinterpret_cast<std::size_t*>(&memory[8]);
-    *count = 0;
-    swapper.sem_put(mutex);
-}
-
-static inline auto barrier(const std::size_t n_threads) {
-    auto& swapper = tDSM::swapper::get();
-    const auto memory = swapper.memory();
-    static const auto mutex = reinterpret_cast<std::uintptr_t>(&memory[0]);
-    static const auto barrier = reinterpret_cast<std::uintptr_t>(&memory[1]);
-    static const auto count = reinterpret_cast<std::size_t*>(&memory[8]);
-
-    spdlog::info("Barrier enter");
-    swapper.sem_get(mutex);
-    if (*count == n_threads) {
-        *count = 1;
-    } else {
-        *count += 1;
-    }
-    const auto current_count = *count;
-    swapper.sem_put(mutex);
-
-    spdlog::info("Barrier Count {}", current_count);
-
-    if (current_count == n_threads) {
-        swapper.sem_put(barrier);
-    }
-
-    swapper.sem_get(barrier);
-    swapper.sem_put(barrier);
-}
-
-
-void memtest(const std::size_t testers, const int iter);
+void memtest(tDSM::barrier& barrier, const int iter);
 __attribute__((noinline))
-void memtest(const std::size_t testers, const int iter) {
+void memtest(tDSM::barrier& barrier, const int iter) {
     auto& swapper = tDSM::swapper::get();
     const auto my_id = swapper.get_id();
     auto memory = reinterpret_cast<std::uint64_t*>(swapper.memory() + page_size);
     memory[my_id] = 0;
     std::uint64_t local_count = 0;
 
-    barrier(testers);
+    barrier();
 
     spdlog::info("Thread {} started", my_id);
 
@@ -91,20 +56,20 @@ int main() {
     constexpr auto testers = 3;
     constexpr auto iter = 65535;
 
-    barrier_init();
+    const auto barrier = tDSM::make_unique<tDSM::barrier>(testers);
 
     std::vector<std::thread> threads(testers - 1);
 
     for (auto i = 2u; auto& t : threads) {
         swapper.wait_for_peer(i);
-        t = std::thread([i] {
+        t = std::thread([i, &barrier] {
             rpc_memtest.remote = i;
-            rpc_memtest(testers, iter);
+            rpc_memtest(*barrier, iter);
         });
         i++;
     }
 
-    memtest(testers, iter);
+    memtest(*barrier, iter);
 
     for (auto& t : threads) {
         t.join();

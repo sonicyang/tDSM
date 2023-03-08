@@ -54,6 +54,8 @@ namespace tDSM::packet {
         send_page,
         my_page,
         your_page,
+        make_sem,
+        new_sem,
         sem_get,
         sem_put,
         call,
@@ -108,6 +110,14 @@ namespace tDSM::packet {
 
     DEFINE_PACKET(your_page,
         std::size_t frame_id = 0x0;
+    );
+
+    DEFINE_PACKET(make_sem,
+        std::size_t initial_count = 0x0;
+    );
+
+    DEFINE_PACKET(new_sem,
+        std::size_t address = 0x0;
     );
 
     DEFINE_PACKET(sem_get,

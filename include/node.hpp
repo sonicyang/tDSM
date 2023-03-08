@@ -55,6 +55,11 @@ zmq::message_t dispatch_rpc(const std::size_t action, const zmq::message_t& args
 
 namespace details {
 
+enum static_semaphore : std::uintptr_t {
+    allocator_lock,
+    static_semaphore_count
+};
+
 class peers {
  public:
     using id_t = std::size_t;
@@ -251,6 +256,8 @@ class Node {
             HANDLE(send_page);
             HANDLE(my_page);
             HANDLE(your_page);
+            HANDLE(make_sem);
+            HANDLE(new_sem);
             HANDLE(sem_get);
             HANDLE(sem_put);
             HANDLE(call);
@@ -285,6 +292,8 @@ class Node {
     HANDLER(send_page)
     HANDLER(my_page)
     HANDLER(your_page)
+    HANDLER(make_sem)
+    HANDLER(new_sem)
     HANDLER(sem_get)
     HANDLER(sem_put)
     HANDLER(call)
@@ -385,6 +394,7 @@ class master_node : public Node {
     }
 
     // semaphore list
+    std::atomic_uint64_t free_sem_head{details::static_semaphore::static_semaphore_count};
     mutable std::shared_mutex sem_queues_mutex{};
     struct sem_state {
         mutable std::mutex mutex{};
@@ -392,6 +402,23 @@ class master_node : public Node {
         std::deque<id_t> queue{};
     };
     std::unordered_map<std::uintptr_t, sem_state> sem_queues{};
+
+    bool handle_make_sem(zmq::socket_ref, const packet::make_sem_packet& msg) final {
+        logger->trace("Creating new sem from ID: {}", msg.hdr.from);
+        const auto new_sem_address = this->free_sem_head.fetch_add(1);
+
+        {
+            std::unique_lock<std::shared_mutex> lk(this->sem_queues_mutex);
+            this->sem_queues[new_sem_address].count = msg.initial_count;
+        }
+
+        {
+            const auto nbytes = this->rpc_endpoint.send(packet::new_sem_packet{ .address = new_sem_address }, zmq::send_flags::none);
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::new_sem_packet), "Failed to send new semaphore address");
+        }
+
+        return OK;
+    }
 
     bool handle_sem_get(zmq::socket_ref, const packet::sem_get_packet& msg) final {
         logger->trace("Queue sem get at 0x{:x} from ID: {}", msg.address, msg.hdr.from);
@@ -402,16 +429,6 @@ class master_node : public Node {
         }
 
         std::shared_lock<std::shared_mutex> lk(this->sem_queues_mutex);
-        if (!this->sem_queues.contains(msg.address)) {
-            lk.unlock();
-            std::unique_lock<std::shared_mutex> lk2(this->sem_queues_mutex);
-            if (!this->sem_queues.contains(msg.address)) {
-                this->sem_queues[msg.address].count = 0;
-            }
-            lk2.unlock();
-            lk.lock();
-        }
-
         std::unique_lock<std::mutex> lk2(this->sem_queues[msg.address].mutex);
         if (this->sem_queues[msg.address].count > 0) {
             this->sem_queues[msg.address].count--;
@@ -434,16 +451,6 @@ class master_node : public Node {
         }
 
         std::shared_lock<std::shared_mutex> lk(this->sem_queues_mutex);
-        if (!this->sem_queues.contains(msg.address)) {
-            lk.unlock();
-            std::unique_lock<std::shared_mutex> lk2(this->sem_queues_mutex);
-            if (!this->sem_queues.contains(msg.address)) {
-                this->sem_queues[msg.address].count = 0;
-            }
-            lk2.unlock();
-            lk.lock();
-        }
-
         std::unique_lock<std::mutex> lk2(this->sem_queues[msg.address].mutex);
         if (this->sem_queues[msg.address].queue.empty()) {
             this->sem_queues[msg.address].count++;

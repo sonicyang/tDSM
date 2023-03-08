@@ -19,51 +19,17 @@
 #include <spdlog/spdlog.h>
 #include <cstdint>
 
+#include "allocator.hpp"
+#include "barrier.hpp"
 #include "configs.hpp"
 #include "node.hpp"
 #include "swapper.hpp"
 #include "rpc_adapter.hpp"
 
-static inline auto barrier_init() {
-    auto& swapper = tDSM::swapper::get();
-    const auto memory = swapper.memory();
-    static const auto mutex = reinterpret_cast<std::uintptr_t>(&memory[0]);
-    static const auto count = reinterpret_cast<std::size_t*>(&memory[8]);
-    *count = 0;
-    swapper.sem_put(mutex);
-}
-
-static inline auto barrier(const std::size_t n_threads) {
-    auto& swapper = tDSM::swapper::get();
-    const auto memory = swapper.memory();
-    static const auto mutex = reinterpret_cast<std::uintptr_t>(&memory[0]);
-    static const auto barrier = reinterpret_cast<std::uintptr_t>(&memory[1]);
-    static const auto count = reinterpret_cast<std::size_t*>(&memory[8]);
-
-    spdlog::info("Barrier enter");
-    swapper.sem_get(mutex);
-    if (*count == n_threads) {
-        *count = 1;
-    } else {
-        *count += 1;
-    }
-    const auto current_count = *count;
-    swapper.sem_put(mutex);
-
-    spdlog::info("Barrier Count {}", current_count);
-
-    if (current_count == n_threads) {
-        swapper.sem_put(barrier);
-    }
-
-    swapper.sem_get(barrier);
-    swapper.sem_put(barrier);
-}
-
-void vector_add(const std::size_t testers, int& sum, const int* vec, const std::size_t start, const std::size_t end);
+void vector_add(tDSM::barrier& barrier, int& sum, const int* vec, const std::size_t start, const std::size_t end);
 __attribute__((noinline))
-void vector_add(const std::size_t testers, int& sum, const int* vec, const std::size_t start, const std::size_t end) {
-    barrier(testers);
+void vector_add(tDSM::barrier& barrier, int& sum, const int* vec, const std::size_t start, const std::size_t end) {
+    barrier();
 
     spdlog::info("Thread Started");
 
@@ -97,7 +63,7 @@ int main() {
 
     constexpr auto testers = 3;
 
-    barrier_init();
+    const auto barrier = tDSM::make_unique<tDSM::barrier>(testers);
 
     std::vector<std::thread> threads(testers - 1);
 
@@ -111,14 +77,14 @@ int main() {
 
     for (auto i = 2u; auto& t : threads) {
         swapper.wait_for_peer(i);
-        t = std::thread([i, sum, vec, slice_size] {
+        t = std::thread([i, sum, vec, slice_size, &barrier] {
             rpc_vector_add.remote = i;
-            rpc_vector_add(testers, *sum, vec, (i - 1) * slice_size, std::min(i * slice_size, static_cast<decltype(i * slice_size)>(size)));
+            rpc_vector_add(*barrier, *sum, vec, (i - 1) * slice_size, std::min(i * slice_size, static_cast<decltype(i * slice_size)>(size)));
         });
         i++;
     }
 
-    vector_add(testers, *sum, vec, 0, std::min(slice_size, size));
+    vector_add(*barrier, *sum, vec, 0, std::min(slice_size, size));
 
     for (auto& t : threads) {
         t.join();

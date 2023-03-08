@@ -18,24 +18,41 @@
 
 #include "configs.hpp"
 #include "swapper.hpp"
+#include "semaphore.hpp"
 #include "utils/logging.hpp"
 
 namespace tDSM {
 
-struct semaphore {
-    using type = std::uintptr_t;
+class barrier {
+ public:
+    const std::size_t n_threads;
 
-    const type address;
+    barrier(const std::size_t n_threads_) : n_threads(n_threads_) {}
 
-    semaphore(const std::size_t initial_count) : address(swapper::get().make_sem(initial_count)) {}
+    void operator()() {
+        this->mutex.get();
+        if (count == n_threads) {
+            count = 1;
+            this->chain.get();
+        } else {
+            count += 1;
+        }
+        const auto current_count = count;
+        this->mutex.put();
 
-    void put() {
-        tDSM::swapper::get().sem_put(this->address);
+        if (current_count == this->n_threads) {
+            this->chain.put();
+            return;
+        }
+
+        this->chain.get();
+        this->chain.put();
     }
 
-    void get() {
-        tDSM::swapper::get().sem_get(this->address);
-    }
+ private:
+    semaphore mutex{1};
+    semaphore chain{0};
+    std::size_t count{0};
 };
 
 }  // namespace tDSM
