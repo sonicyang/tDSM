@@ -64,39 +64,32 @@ class swapper : public peer_node {
     }
 
     inline auto make_sem(const std::size_t initial_count) {
+        const auto current_req_num = this->make_sem_req_count.fetch_add(1);
+
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-            this->directory_rpc_endpoint.send(packet::make_sem_packet{ .initial_count = initial_count }) != sizeof(packet::make_sem_packet),
+            this->atomic_rpc_send_request(packet::make_sem_packet{ .initial_count = initial_count, .request_num = current_req_num }),
             "Failed to make a new semaphore"
         );
 
-        zmq::message_t message;
-        const auto nbytes = this->directory_rpc_endpoint.recv(message, zmq::recv_flags::none);
-        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-            nbytes != sizeof(packet::new_sem_packet),
-            "Failed recv new_sem_packet"
-        );
+        auto& rendezvous = [&]()  -> decltype(auto){
+            std::scoped_lock<std::mutex> lk(this->out_standing_make_sem_mutex);
+            this->out_standing_make_sem[current_req_num] = std::make_unique<make_sem_rendezvous>();
+            return this->out_standing_make_sem[current_req_num];
+        }();
 
-        const auto msg = message.data<packet::new_sem_packet>();
+        rendezvous->sem.acquire();
 
-        // Must be first touch
-        std::unique_lock<std::shared_mutex> lk(this->sem_list_mutex);
-        this->sem_list[msg->address] = std::make_unique<sem_semaphore>(0);
+        std::scoped_lock<std::mutex> lk(this->out_standing_make_sem_mutex);
+        const auto address = this->out_standing_make_sem[current_req_num]->address;
+        this->out_standing_make_sem.erase(current_req_num);
 
-        return msg->address;
+        return address;
     }
 
     inline auto sem_get(const std::uintptr_t address) {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-            this->directory_rpc_endpoint.send(packet::sem_get_packet{ .address = address }) != sizeof(packet::sem_get_packet),
-            "Failed send sem get message for 0x{:x}",
-            address
-        );
-
-        zmq::message_t message;
-        const auto nbytes = this->directory_rpc_endpoint.recv(message, zmq::recv_flags::none);
-        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-            nbytes != sizeof(packet::noop_packet),
-            "Failed recv sem get return for 0x{:x}",
+            this->atomic_rpc_send_request(packet::sem_get_packet{ .address = address }),
+            "Failed send sem get message for {}",
             address
         );
 
@@ -114,23 +107,20 @@ class swapper : public peer_node {
             return this->sem_list[address];
         }();
 
-        logger->trace("Semaphore: get {:x}", address);
+        sem_logger->trace("Semaphore: get {}", address);
 
         sem->acquire();
     }
 
     inline auto sem_put(const std::uintptr_t address) {
-        tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-            this->directory_rpc_endpoint.send(packet::sem_put_packet{ .address = address }) != sizeof(packet::sem_put_packet),
-            "Failed send sem get message for 0x{:x}",
-            address
-        );
+        // Compiler fence
+        asm inline (""::: "memory");
 
-        zmq::message_t message;
-        const auto nbytes = this->directory_rpc_endpoint.recv(message, zmq::recv_flags::none);
+        sem_logger->trace("Semaphore: putting {}", address);
+
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(
-            nbytes != sizeof(packet::noop_packet),
-            "Failed recv sem get return for 0x{:x}",
+            this->atomic_rpc_send_request(packet::sem_put_packet{ .address = address }),
+            "Failed send sem get message for {}",
             address
         );
     }
@@ -258,6 +248,14 @@ class swapper : public peer_node {
     mutable std::shared_mutex sem_list_mutex{};
     std::unordered_map<std::uintptr_t, std::unique_ptr<sem_semaphore>> sem_list{};
 
+    std::mutex out_standing_make_sem_mutex{};
+    std::atomic_size_t make_sem_req_count{0};
+    struct make_sem_rendezvous {
+        std::binary_semaphore sem{0};
+        std::uintptr_t address{};
+    };
+    std::unordered_map<std::size_t, std::unique_ptr<make_sem_rendezvous>> out_standing_make_sem{};
+
     inline auto ask_page(const frame_id_t frame_id) {
         // Download the page data from owner
         logger->debug("Asking frame {} {} {}", frame_id, packet::ask_page_packet{ .frame_id = frame_id }.hdr.from, packet::my_id);
@@ -298,7 +296,7 @@ class swapper : public peer_node {
         states[frame_id].store(s, order);
     }
 
-    bool handle_ask_page(zmq::socket_ref, const packet::ask_page_packet& msg) final {
+    bool handle_ask_page(zmq::socket_ref, zmq::message_t&, const packet::ask_page_packet& msg) final {
         // Someone is asking for a page
         const auto peer_id       = msg.hdr.from;
         const auto frame_id      = msg.frame_id;
@@ -347,7 +345,7 @@ class swapper : public peer_node {
         return false;
     }
 
-    bool handle_send_page(zmq::socket_ref sock, const packet::send_page_packet& msg) final {
+    bool handle_send_page(zmq::socket_ref sock, zmq::message_t&, const packet::send_page_packet& msg) final {
         // Someone is sending a data of a page to me
         const auto peer_id  = msg.hdr.from;
         const auto frame_id = msg.frame_id;
@@ -408,7 +406,7 @@ class swapper : public peer_node {
         return OK;
     }
 
-    bool handle_my_page(zmq::socket_ref, const packet::my_page_packet& msg) final {
+    bool handle_my_page(zmq::socket_ref, zmq::message_t&, const packet::my_page_packet& msg) final {
         // Someone is taking the ownership of a page
         const auto peer_id  = msg.hdr.from;
         const auto frame_id = msg.frame_id;
@@ -458,7 +456,7 @@ class swapper : public peer_node {
         return OK;
     }
 
-    bool handle_your_page(zmq::socket_ref, const packet::your_page_packet& msg) final {
+    bool handle_your_page(zmq::socket_ref, zmq::message_t&, const packet::your_page_packet& msg) final {
         // Someone is responding the request we want to take ownership of the page
         const auto peer_id  = msg.hdr.from;
         const auto frame_id = msg.frame_id;
@@ -484,6 +482,7 @@ class swapper : public peer_node {
     // Actual worker thread function
     inline void run() {
         auto& poller = this->peers.get_poller();
+        poller.add(this->directory_rpc_endpoint, zmq::event_flags::pollin);
         poller.add_fd(this->faultfd.get(), zmq::event_flags::pollin);
         poller.add_fd(this->thread.evtfd.get(), zmq::event_flags::pollin);
 
@@ -519,7 +518,8 @@ class swapper : public peer_node {
                 const auto peer_id = header->from;
 
                 // Default actions
-                if (this->handle_a_packet(event.socket, message)) {
+                zmq::message_t id;
+                if (this->handle_a_packet(event.socket, id, message)) {
                     logger->debug("swapper connection to peer {} ended!", peer_id);
                 }
             }
@@ -601,7 +601,7 @@ class swapper : public peer_node {
         }
     }
 
-    bool handle_sem_put(zmq::socket_ref, const packet::sem_put_packet& msg) final {
+    bool handle_sem_put(zmq::socket_ref, zmq::message_t&, const packet::sem_put_packet& msg) final {
         auto& sem = [&]() -> decltype(auto) {
             std::shared_lock<std::shared_mutex> lk(this->sem_list_mutex);
             if (!this->sem_list.contains(msg.address)) {
@@ -616,9 +616,28 @@ class swapper : public peer_node {
             return this->sem_list[msg.address];
         }();
 
-        logger->trace("Semaphore: put {:x}", msg.address);
+        sem_logger->trace("Semaphore: put {}", msg.address);
 
         sem->release(1);
+        return OK;
+    }
+
+    bool handle_new_sem(zmq::socket_ref, zmq::message_t&, const packet::new_sem_packet& msg) final {
+        const auto address = msg.address;
+        const auto request_num = msg.request_num;
+
+        // Must be first touch
+        {
+            std::unique_lock<std::shared_mutex> lk(this->sem_list_mutex);
+            this->sem_list[address] = std::make_unique<sem_semaphore>(0);
+        }
+
+        sem_logger->trace("Semaphore: made {}", address);
+
+        std::scoped_lock<std::mutex> lk(this->out_standing_make_sem_mutex);
+        this->out_standing_make_sem[request_num]->address = address;
+        this->out_standing_make_sem[request_num]->sem.release(1);
+
         return OK;
     }
 };

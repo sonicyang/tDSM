@@ -114,10 +114,12 @@ namespace tDSM::packet {
 
     DEFINE_PACKET(make_sem,
         std::size_t initial_count = 0x0;
+        std::size_t request_num = 0x0;
     );
 
     DEFINE_PACKET(new_sem,
         std::size_t address = 0x0;
+        std::size_t request_num = 0x0;
     );
 
     DEFINE_PACKET(sem_get,

@@ -183,7 +183,7 @@ struct deleter<T[]> {
 
 
 template<typename T, typename... Ts>
-static inline auto make_unique(Ts&&... ts) {
+static inline std::enable_if_t<!std::is_array_v<T>, std::unique_ptr<T, deleter<T>>> make_unique(Ts&&... ts) {
     auto memory = details::allocator::get().alloc(sizeof(T));
     if (memory == nullptr) {
         throw std::bad_alloc{};
@@ -194,12 +194,12 @@ static inline auto make_unique(Ts&&... ts) {
 
 template<typename T>
 static inline auto make_unique(const std::size_t count) {
-    auto memory = details::allocator::get().alloc(sizeof(T) * count);
+    auto memory = details::allocator::get().alloc(sizeof(std::remove_extent_t<T>) * count);
     if (memory == nullptr) {
         throw std::bad_alloc{};
     }
 
-    return std::unique_ptr<T[], deleter<T[]>>(new (memory) T[count]);
+    return std::unique_ptr<T, deleter<T>>(new (memory) std::remove_extent_t<T>[count]);
 }
 
 template<typename T>

@@ -22,10 +22,10 @@
 
 namespace tDSM {
 
-static inline auto init_logging() {
+static inline auto init_logging(auto& logger, const char* env_name) {
     logger->set_pattern("[%H:%M:%S] [%n] [thread %t] [%^%L%$] %v");
 
-    const auto level = std::getenv("LOGLEVEL");
+    const auto level = std::getenv(env_name);
     if (level) {
         switch(std::stol(level)) {
             case 0:
@@ -74,7 +74,8 @@ static inline T getenv_or_default(const char* env, const T def) {
 }
 
 void initialize() {
-    init_logging();
+    init_logging(logger, "LOGLEVEL");
+    init_logging(sem_logger, "SEMLOGLEVEL");
 
     const auto is_directory   = getenv_or_default("DIRECTORY", false);
     const auto compression    = getenv_or_default("COMPRESSION", true);

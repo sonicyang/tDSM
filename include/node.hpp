@@ -163,52 +163,13 @@ class Node {
  protected:
     id_t my_id{};
 
-    // Receiving
-    inline void handle(zmq::socket_ref sock, utils::cancelable_thread& this_thread) {
-        zmq::poller_t<> poller;
-        poller.add(sock, zmq::event_flags::pollin);
-        poller.add_fd(this_thread.evtfd.get(), zmq::event_flags::pollin);
-
-        while (!this_thread.stopped.load(std::memory_order_acquire)) {
-            // Wait for event
-            std::vector<zmq::poller_event<>> events(poller.size());
-            const auto count = poller.wait_all(events, std::chrono::milliseconds{0});
-
-            if (count <= 0) {
-                continue;
-            }
-
-            for (auto& event : events) {
-                if (event.socket == nullptr) {
-                    continue;
-                }
-
-                zmq::message_t message;
-                const auto nbyte = event.socket.recv(message, zmq::recv_flags::none);
-                if (nbyte < sizeof(packet::packet_header) || this->handle_a_packet(event.socket, message)) {
-                    this_thread.stopped.store(true, std::memory_order_relaxed);
-                    break;
-                }
-            }
-        }
-
-        // Don't care even this failed, the socket might be a pub-sub pair
-        try {
-            (void)sock.send(packet::disconnect_packet{}, zmq::send_flags::none);
-        } catch(zmq::error_t&) {
-        }
-
-        poller.remove(sock);
-        poller.remove_fd(this_thread.evtfd.get());
-    }
-
     template<typename T>
-    inline auto forward_packet(zmq::socket_ref sock, const zmq::message_t& message, const auto& func) {
+    inline auto forward_packet(zmq::socket_ref sock, zmq::message_t& id, const zmq::message_t& message, const auto& func) {
         const auto packet = message.data<T>();
-        return (this->*func)(sock, *packet);
+        return (this->*func)(sock, id, *packet);
     }
 
-    inline bool handle_a_packet(zmq::socket_ref sock, const zmq::message_t& message) {
+    inline bool handle_a_packet(zmq::socket_ref sock, zmq::message_t& id, const zmq::message_t& message) {
         bool err = false;
         bool ret = false;
 
@@ -238,13 +199,13 @@ class Node {
             return ret;
         }
 
-#define HANDLE(X) case packet::packet_type::X: err = forward_packet<packet::X##_packet>(sock, message, &Node::handle_##X); break
+#define HANDLE(X) case packet::packet_type::X: err = forward_packet<packet::X##_packet>(sock, id, message, &Node::handle_##X); break
 
         switch (type) {
             case packet::packet_type::disconnect:
                 // No need to recv, socket is close by remote
                 logger->trace("Peer disconnected!");
-                (void)forward_packet<packet::disconnect_packet>(sock, message, &Node::handle_disconnect);
+                (void)forward_packet<packet::disconnect_packet>(sock, id, message, &Node::handle_disconnect);
                 ret = true;
                 break;
             HANDLE(noop);
@@ -277,8 +238,8 @@ class Node {
     }
 
 #define HANDLER(X) \
-    virtual bool handle_##X(zmq::socket_ref, const packet::X##_packet&) { \
-        logger->warn("Ignoring a X packet"); \
+    virtual bool handle_##X(zmq::socket_ref, zmq::message_t&, const packet::X##_packet&) { \
+        logger->warn("Ignoring a " #X " packet"); \
         return OK; \
     }
 
@@ -337,8 +298,9 @@ class master_node : public Node {
 
     bool initialized = false;
 
+    mutable std::mutex rpc_endpoint_send_lock;
     zmq::socket_t pub_endpoint = zmq::socket_t(Context::get().zmq_ctx, zmq::socket_type::pub);
-    zmq::socket_t rpc_endpoint = zmq::socket_t(Context::get().zmq_ctx, zmq::socket_type::rep);
+    zmq::socket_t rpc_endpoint = zmq::socket_t(Context::get().zmq_ctx, zmq::socket_type::router);
     utils::cancelable_thread rpc_thread{};
 
     std::atomic_size_t number_of_peers{1};  // Number 0 is reserved as id not set.
@@ -349,7 +311,72 @@ class master_node : public Node {
     mutable std::mutex peers_mutex{};
     std::unordered_map<id_t, peer> peers{};
 
-    bool handle_disconnect(zmq::socket_ref, const packet::disconnect_packet& msg) final {
+    inline bool atomic_rpc_send_response(zmq::message_t& id, const zmq::const_buffer& msg) {
+        std::scoped_lock<std::mutex> lk(this->rpc_endpoint_send_lock);
+        {
+            zmq::message_t id_clone;
+            id_clone.copy(id);
+            const auto nbytes = this->rpc_endpoint.send(id_clone, zmq::send_flags::sndmore);
+            if (nbytes != id.size()) {
+                return has_error;
+            }
+        }
+        {
+            const auto nbytes = this->rpc_endpoint.send(msg, zmq::send_flags::none);
+            if (nbytes != msg.size()) {
+                return has_error;
+            }
+        }
+        return OK;
+    }
+
+    // Receiving the request envelope
+    inline void handle(zmq::socket_ref sock, utils::cancelable_thread& this_thread) {
+        zmq::poller_t<> poller;
+        poller.add(sock, zmq::event_flags::pollin);
+        poller.add_fd(this_thread.evtfd.get(), zmq::event_flags::pollin);
+
+        while (!this_thread.stopped.load(std::memory_order_acquire)) {
+            // Wait for event
+            std::vector<zmq::poller_event<>> events(poller.size());
+            const auto count = poller.wait_all(events, std::chrono::milliseconds{0});
+
+            if (count <= 0) {
+                continue;
+            }
+
+            for (auto& event : events) {
+                if (event.socket == nullptr) {
+                    continue;
+                }
+
+                zmq::message_t id;
+                zmq::message_t message;
+                (void)event.socket.recv(id, zmq::recv_flags::none);
+                if (!id.more()) {
+                    continue;
+                }
+                const auto nbyte2 = event.socket.recv(message, zmq::recv_flags::none);
+                if (nbyte2 < sizeof(packet::packet_header)) {
+                    continue;
+                }
+
+                if (this->handle_a_packet(event.socket, id, message)) {
+                    this_thread.stopped.store(true, std::memory_order_relaxed);
+                    break;
+                }
+            }
+        }
+
+        // Don't care for the error
+        (void)sock.send(packet::disconnect_packet{}, zmq::send_flags::none);
+
+        poller.remove(sock);
+        poller.remove_fd(this_thread.evtfd.get());
+    }
+
+
+    bool handle_disconnect(zmq::socket_ref, zmq::message_t&, const packet::disconnect_packet& msg) final {
         std::scoped_lock<std::mutex> lk(this->peers_mutex);
 
         const auto peer_id = msg.hdr.from;
@@ -357,32 +384,28 @@ class master_node : public Node {
         return OK;
     }
 
-    bool handle_connect(zmq::socket_ref, const packet::connect_packet& msg) final {
+    bool handle_connect(zmq::socket_ref, zmq::message_t& id, const packet::connect_packet& msg) final {
         const auto peer_id = number_of_peers.fetch_add(1);
         logger->trace("Accepting new peer : ID: {}", peer_id);
 
         // One at a time, no race
-        {
-            const auto nbytes = this->rpc_endpoint.send(packet::configure_packet{ .peer_id = peer_id, .use_compression = use_compression }, zmq::send_flags::none);
-            if (nbytes != sizeof(packet::configure_packet)) {
-                return has_error;
-            }
+        std::scoped_lock<std::mutex> lk(this->peers_mutex);
+
+        if (this->atomic_rpc_send_response(id, packet::configure_packet{ .peer_id = peer_id, .use_compression = use_compression })) {
+            return has_error;
         }
 
-        {
-            std::scoped_lock<std::mutex> lk(this->peers_mutex);
-            for (const auto& [id, peer] : this->peers) {
-                packet::register_peer_packet pkt;
-                pkt.peer_id = id;
-                std::copy_n(peer.addr.c_str(), sizeof(pkt.addr), pkt.addr);
-                pkt.port = peer.port;
+        for (const auto& [id, peer] : this->peers) {
+            packet::register_peer_packet pkt;
+            pkt.peer_id = id;
+            std::copy_n(peer.addr.c_str(), sizeof(pkt.addr), pkt.addr);
+            pkt.port = peer.port;
 
-                (void)this->pub_endpoint.send(pkt, zmq::send_flags::none);
-            }
-
-            peer p;
-            this->peers.emplace(peer_id, peer{msg.addr, msg.port});
+            (void)this->pub_endpoint.send(pkt, zmq::send_flags::none);
         }
+
+        peer p;
+        this->peers.emplace(peer_id, peer{msg.addr, msg.port});
 
         packet::register_peer_packet pkt;
         pkt.peer_id = peer_id;
@@ -399,12 +422,12 @@ class master_node : public Node {
     struct sem_state {
         mutable std::mutex mutex{};
         std::size_t count{};
-        std::deque<id_t> queue{};
+        std::deque<zmq::message_t> queue{};
     };
     std::unordered_map<std::uintptr_t, sem_state> sem_queues{};
 
-    bool handle_make_sem(zmq::socket_ref, const packet::make_sem_packet& msg) final {
-        logger->trace("Creating new sem from ID: {}", msg.hdr.from);
+    bool handle_make_sem(zmq::socket_ref, zmq::message_t& id, const packet::make_sem_packet& msg) final {
+        sem_logger->trace("Creating new sem from ID: {}", msg.hdr.from);
         const auto new_sem_address = this->free_sem_head.fetch_add(1);
 
         {
@@ -413,38 +436,30 @@ class master_node : public Node {
         }
 
         {
-            const auto nbytes = this->rpc_endpoint.send(packet::new_sem_packet{ .address = new_sem_address }, zmq::send_flags::none);
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::new_sem_packet), "Failed to send new semaphore address");
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(this->atomic_rpc_send_response(id, packet::new_sem_packet{ .address = new_sem_address, .request_num = msg.request_num }), "Failed to send new semaphore address");
         }
 
         return OK;
     }
 
-    bool handle_sem_get(zmq::socket_ref, const packet::sem_get_packet& msg) final {
-        logger->trace("Queue sem get at 0x{:x} from ID: {}", msg.address, msg.hdr.from);
-
-        {
-            const auto nbytes = this->rpc_endpoint.send(packet::noop_packet{}, zmq::send_flags::none);
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::noop_packet), "Failed to send noop for sem_get");
-        }
-
+    bool handle_sem_get(zmq::socket_ref, zmq::message_t& id, const packet::sem_get_packet& msg) final {
         std::shared_lock<std::shared_mutex> lk(this->sem_queues_mutex);
         std::unique_lock<std::mutex> lk2(this->sem_queues[msg.address].mutex);
         if (this->sem_queues[msg.address].count > 0) {
+            sem_logger->trace("Resume sem get at {} from ID: {}", msg.address, msg.hdr.from);
             this->sem_queues[msg.address].count--;
 
-            const auto nbytes = this->pub_endpoint.send(packet::sem_put_packet{ .address = msg.address }.to(msg.hdr.from), zmq::send_flags::none);
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::sem_put_packet), "Failed to send sem_put");
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(this->atomic_rpc_send_response(id, packet::sem_put_packet{ .address = msg.address }), "Failed to send sem_put");
         } else {
-            this->sem_queues[msg.address].queue.emplace_back(msg.hdr.from);
+            sem_logger->trace("Queue sem get at {} from ID: {}", msg.address, msg.hdr.from);
+            this->sem_queues[msg.address].queue.emplace_back(id.size());
+            this->sem_queues[msg.address].queue.back().copy(id);
         }
 
         return OK;
     }
 
-    bool handle_sem_put(zmq::socket_ref, const packet::sem_put_packet& msg) final {
-        logger->trace("sem put at 0x{:x} from ID: {}", msg.address, msg.hdr.from);
-
+    bool handle_sem_put(zmq::socket_ref, zmq::message_t&, const packet::sem_put_packet& msg) final {
         {
             const auto nbytes = this->rpc_endpoint.send(packet::noop_packet{}, zmq::send_flags::none);
             tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::noop_packet), "Failed to send noop for sem_put");
@@ -453,13 +468,16 @@ class master_node : public Node {
         std::shared_lock<std::shared_mutex> lk(this->sem_queues_mutex);
         std::unique_lock<std::mutex> lk2(this->sem_queues[msg.address].mutex);
         if (this->sem_queues[msg.address].queue.empty()) {
+            sem_logger->trace("Increase by sem put at {} from ID: {}", msg.address, msg.hdr.from);
+
             this->sem_queues[msg.address].count++;
         } else {
-            const auto id_to_wake = this->sem_queues[msg.address].queue.front();
+            auto id_to_wake = std::move(this->sem_queues[msg.address].queue.front());
             this->sem_queues[msg.address].queue.pop_front();
 
-            const auto nbytes = this->pub_endpoint.send(packet::sem_put_packet{ .address = msg.address }.to(id_to_wake), zmq::send_flags::none);
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::sem_put_packet), "Failed to send sem_put");
+            sem_logger->trace("Resume sem put at {} from ID: {}", msg.address, msg.hdr.from);
+
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(this->atomic_rpc_send_response(id_to_wake, packet::sem_put_packet{ .address = msg.address }), "Failed to send sem_put");
         }
 
         return OK;
@@ -516,8 +534,7 @@ class peer_node : public Node {
     ~peer_node() override {
         if (initialized) {
             {
-                const auto nbytes = this->directory_rpc_endpoint.send(packet::disconnect_packet{}, zmq::send_flags::none);
-                tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(packet::disconnect_packet), "Failed to disconnect from directory");
+                tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(this->atomic_rpc_send_request(packet::disconnect_packet{}), "Failed to disconnect from directory");
             }
             this->atomic_pub_send(packet::disconnect_packet{});
         }
@@ -547,10 +564,22 @@ class peer_node : public Node {
     bool initialized = false;
 
     mutable std::mutex pub_endpoint_mutex;
+    mutable std::mutex rpc_endpoint_send_lock;
     zmq::socket_t pub_endpoint = zmq::socket_t(Context::get().zmq_ctx, zmq::socket_type::pub);
     zmq::socket_t directory_sub_endpoint = zmq::socket_t(Context::get().zmq_ctx, zmq::socket_type::sub);
-    zmq::socket_t directory_rpc_endpoint = zmq::socket_t(Context::get().zmq_ctx, zmq::socket_type::req);
+    zmq::socket_t directory_rpc_endpoint = zmq::socket_t(Context::get().zmq_ctx, zmq::socket_type::dealer);
     utils::cancelable_thread directory_sub_thread{};
+
+    inline bool atomic_rpc_send_request(const zmq::const_buffer& msg) {
+        std::scoped_lock<std::mutex> lk(this->rpc_endpoint_send_lock);
+        {
+            const auto nbytes = this->directory_rpc_endpoint.send(msg, zmq::send_flags::none);
+            if (nbytes != msg.size()) {
+                return has_error;
+            }
+        }
+        return OK;
+    }
 
     inline bool atomic_pub_send(const zmq::const_buffer& msg) {
         std::scoped_lock<std::mutex> lk(this->pub_endpoint_mutex);
@@ -582,6 +611,39 @@ class peer_node : public Node {
         return true;
     }
 
+    inline void handle(zmq::socket_ref sock, utils::cancelable_thread& this_thread) {
+        zmq::poller_t<> poller;
+        poller.add(sock, zmq::event_flags::pollin);
+        poller.add_fd(this_thread.evtfd.get(), zmq::event_flags::pollin);
+
+        while (!this_thread.stopped.load(std::memory_order_acquire)) {
+            // Wait for event
+            std::vector<zmq::poller_event<>> events(poller.size());
+            const auto count = poller.wait_all(events, std::chrono::milliseconds{0});
+
+            if (count <= 0) {
+                continue;
+            }
+
+            for (auto& event : events) {
+                if (event.socket == nullptr) {
+                    continue;
+                }
+
+                zmq::message_t id;
+                zmq::message_t message;
+                const auto nbyte = event.socket.recv(message, zmq::recv_flags::none);
+                if (nbyte < sizeof(packet::packet_header) || this->handle_a_packet(event.socket, id, message)) {
+                    this_thread.stopped.store(true, std::memory_order_relaxed);
+                    break;
+                }
+            }
+        }
+
+        poller.remove(sock);
+        poller.remove_fd(this_thread.evtfd.get());
+    }
+
     inline auto initialize(const std::string& directory_addr_, const std::string& my_addr_, const std::uint16_t my_port_) {
         tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(initialized, "Cannot initialize twice");
 
@@ -605,9 +667,9 @@ class peer_node : public Node {
             packet::connect_packet pkt;
             std::strncpy(pkt.addr, this->my_addr.c_str(), sizeof(pkt.addr) - 1);
             pkt.port = this->my_port;
-            const auto nbytes = this->directory_rpc_endpoint.send(pkt, zmq::send_flags::none);
-            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(nbytes != sizeof(pkt), "Failed to connect to directory");
+            tDSM_SPDLOG_ASSERT_DUMP_IF_ERROR(this->atomic_rpc_send_request(pkt), "Failed to connect to directory");
         }
+        logger->info("WAIT");
         {
             zmq::message_t message;
             const auto nbytes = this->directory_rpc_endpoint.recv(message, zmq::recv_flags::none);
@@ -682,13 +744,13 @@ class peer_node : public Node {
     }
 
  private:
-    bool handle_disconnect(zmq::socket_ref, const packet::disconnect_packet& msg) final {
+    bool handle_disconnect(zmq::socket_ref, zmq::message_t&, const packet::disconnect_packet& msg) final {
         const auto peer_id = msg.hdr.from;
         peers.del(peer_id);
         return OK;
     }
 
-    bool handle_register_peer(zmq::socket_ref, const packet::register_peer_packet& msg) final {
+    bool handle_register_peer(zmq::socket_ref, zmq::message_t&, const packet::register_peer_packet& msg) final {
         if (msg.peer_id == this->my_id || this->peers.get_peers().contains(msg.peer_id)) {  // no loop back, and duplication
             return OK;
         }
@@ -776,7 +838,7 @@ class peer_node : public Node {
         }
     }
 
-    bool handle_call(zmq::socket_ref sock, const packet::call_packet& msg) final {
+    bool handle_call(zmq::socket_ref sock, zmq::message_t&, const packet::call_packet& msg) final {
         std::unique_lock<std::mutex> lk(this->rpc_queue_mutex);
 
         // Did the call came?
@@ -804,7 +866,7 @@ class peer_node : public Node {
         return this->atomic_pub_send(packet::call_ack_packet{ .call_id = msg.call_id }.to(msg.hdr.from));
     }
 
-    bool handle_call_ack(zmq::socket_ref, const packet::call_ack_packet& msg) final {
+    bool handle_call_ack(zmq::socket_ref, zmq::message_t&, const packet::call_ack_packet& msg) final {
         std::scoped_lock<std::mutex> lk(this->outstanding_rpcs_mutex);  // prevent deletion or insertion
         if (!this->outstanding_rpcs.contains(msg.call_id)) {
             return has_error;
@@ -815,7 +877,7 @@ class peer_node : public Node {
         return OK;
     }
 
-    bool handle_ret(zmq::socket_ref sock, const packet::ret_packet& msg) final {
+    bool handle_ret(zmq::socket_ref sock, zmq::message_t&, const packet::ret_packet& msg) final {
         std::unique_lock<std::mutex> lk(this->outstanding_rpcs_mutex);
         if (!this->outstanding_rpcs.contains(msg.call_id)) {
             logger->warn("Return for RPC ID {} read multiple times!", msg.call_id);
@@ -842,7 +904,7 @@ class peer_node : public Node {
         return this->atomic_pub_send(packet::ret_ack_packet{ .call_id = msg.call_id }.to(msg.hdr.from));
     }
 
-    bool handle_ret_ack(zmq::socket_ref, const packet::ret_ack_packet& msg) final {
+    bool handle_ret_ack(zmq::socket_ref, zmq::message_t&, const packet::ret_ack_packet& msg) final {
         std::scoped_lock<std::mutex> lk(this->outstanding_rpc_rets_mutex);  // prevent deletion
         if (!this->outstanding_rpc_rets.contains(msg.hdr.from) || !this->outstanding_rpc_rets[msg.hdr.from].contains(msg.call_id)) {
             return has_error;

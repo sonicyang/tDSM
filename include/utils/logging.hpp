@@ -22,6 +22,7 @@
 namespace tDSM {
 
 extern std::shared_ptr<spdlog::logger> logger;
+extern std::shared_ptr<spdlog::logger> sem_logger;
 
 }  // namespace tDSM
 

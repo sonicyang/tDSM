@@ -22,5 +22,6 @@
 namespace tDSM {
 
 std::shared_ptr<spdlog::logger> logger = spdlog::stderr_color_mt("tDSM");
+std::shared_ptr<spdlog::logger> sem_logger = spdlog::stderr_color_mt(" SEM");
 
 }  // tDSM
